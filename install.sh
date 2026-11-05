@@ -17,6 +17,7 @@ command -v curl >/dev/null || die "缺少 curl"
 bash -n "$ROOT/bin/ccms"
 node --check "$ROOT/lib/ccms/router.js"
 node --check "$ROOT/lib/ccms/stats.js"
+node --check "$ROOT/lib/ccms/keystore.js"
 jq -e . "$ROOT/config/routes.json" >/dev/null
 jq -e . "$ROOT/config/providers.json" >/dev/null
 
@@ -24,8 +25,10 @@ install -d "$PREFIX/bin" "$PREFIX/lib/ccms" "$CCMS_HOME"
 install -m 755 "$ROOT/bin/ccms" "$PREFIX/bin/ccms"
 install -m 644 "$ROOT/lib/ccms/router.js" "$PREFIX/lib/ccms/router.js"
 install -m 644 "$ROOT/lib/ccms/stats.js" "$PREFIX/lib/ccms/stats.js"
+install -m 644 "$ROOT/lib/ccms/keystore.js" "$PREFIX/lib/ccms/keystore.js"
 
-# 已有配置永不覆盖，避免部署时丢路由或密钥。
+# 已有配置永不覆盖，避免部署时丢路由、密钥或加密主密钥。
+# keys.enc / keystore.key 由 CLI 首次写入时创建，这里不生成、不覆盖。
 if [[ ! -f "$CCMS_HOME/routes.json" ]]; then
   install -m 600 "$ROOT/config/routes.json" "$CCMS_HOME/routes.json"
 fi
@@ -41,6 +44,6 @@ ln -sfn "$ROOT/README.md" "$CCMS_HOME/README.md"
 
 ok "已部署到 $PREFIX"
 ok "配置目录 $CCMS_HOME（现有配置未覆盖）"
-if curl -fsS -m 2 "http://$(jq -r '.listen' "$CCMS_HOME/routes.json")/ccms/health" >/dev/null 2>&1; then
+if curl -fsS -m 2 --noproxy '*' "http://$(jq -r '.listen' "$CCMS_HOME/routes.json")/ccms/health" >/dev/null 2>&1; then
   printf '! router 正在运行；如需加载新代码，执行: ccms --router --restart\n'
 fi

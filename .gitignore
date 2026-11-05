@@ -3,6 +3,8 @@
 
 # 真实运行配置和状态，不提交
 /config/keys.env
+/config/keys.enc
+/config/keystore.key
 /config/state.json
 /config/stats.json
 /config/router.log

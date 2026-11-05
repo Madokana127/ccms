@@ -6,6 +6,9 @@ set -euo pipefail
 CCMS_HOME="${CCMS_HOME:-$HOME/.config/ccms}"
 PROVIDERS="$CCMS_HOME/providers.json"
 KEYS="$CCMS_HOME/keys.env"
+ENC="$CCMS_HOME/keys.enc"
+KEYFILE="$CCMS_HOME/keystore.key"
+KEYSTORE_JS="${CCMS_KEYSTORE_JS:-/usr/local/lib/ccms/keystore.js}"
 STATE="$CCMS_HOME/state.json"
 ROUTES="$CCMS_HOME/routes.json"
 ROUTER_JS="${CCMS_ROUTER_JS:-/usr/local/lib/ccms/router.js}"
@@ -53,7 +56,18 @@ has_p()  { jq -e --arg p "$1" 'has($p)' "$PROVIDERS" >/dev/null 2>&1; }
 getp()   { jq -r --arg p "$1" --arg f "$2" '.[$p][$f] // empty' "$PROVIDERS"; }
 strip_slash() { printf '%s' "${1%/}"; }
 
-load_keys() { if [[ -f "$KEYS" ]]; then set -a; . "$KEYS"; set +a; fi; }
+load_keys() {
+  if [[ -f "$ENC" ]]; then
+    command -v node >/dev/null || die "读取加密密钥库需要 node"
+    local plain
+    plain="$(node "$KEYSTORE_JS" open)" || die "密钥库解密失败（ccms --vault --status 查看）"
+    set -a
+    . <(printf '%s\n' "$plain")
+    set +a
+  elif [[ -f "$KEYS" ]]; then
+    set -a; . "$KEYS"; set +a
+  fi
+}
 key_for()   { provider_keys "$1" | head -n 1; }
 key_ok()    { [[ -n "$1" && "$1" != *REPLACE_ME* && "$1" != "sk-" ]]; }
 
@@ -77,10 +91,10 @@ have_key() {
   return 1
 }
 upsert_env() {
-  local n="$1" v="$2" tmp
-  tmp="$(mktemp)"
-  awk -v n="$n" -v v="$v" 'BEGIN{d=0} $0 ~ "^"n"=" {print n"="v; d=1; next} {print} END{if(!d) print n"="v}' "$KEYS" > "$tmp"
-  mv "$tmp" "$KEYS"; chmod 600 "$KEYS"
+  local n="$1" v="$2"
+  # 值走 stdin，不出现在 argv 里；写入后重新加载，避免计数用旧值。
+  printf '%s' "$v" | node "$KEYSTORE_JS" set "$n" >/dev/null \
+    || die "写入密钥库失败（ccms --vault --status 查看）"
   load_keys
 }
 mask()      { local s="$1"; if (( ${#s} <= 10 )); then printf '***'; else printf '%s…%s' "${s:0:6}" "${s: -4}"; fi; }
@@ -100,6 +114,9 @@ resolve_sub() {
     restart|--restart)    printf 'restart' ;;
     logs|--logs)          printf 'logs' ;;
     ensure|--ensure)      printf 'ensure' ;;
+    seal|--seal)          printf 'seal' ;;
+    open|--open)          printf 'open' ;;
+    rekey|--rekey)        printf 'rekey' ;;
     *)                    printf '' ;;
   esac
 }
@@ -113,7 +130,7 @@ ensure_settings() {
 # ---------- router helpers ----------
 router_addr()  { jq -r '.listen // "127.0.0.1:8788"' "$ROUTES" 2>/dev/null || echo "127.0.0.1:8788"; }
 router_port()  { router_addr | awk -F: '{print $NF}'; }
-router_probe() { curl -sS -m 2 "http://127.0.0.1:$(router_port)/ccms/health" 2>/dev/null; }
+router_probe() { curl -sS -m 2 --noproxy '*' "http://127.0.0.1:$(router_port)/ccms/health" 2>/dev/null; }
 router_alive() { [[ "$(router_probe)" == *'"ok":true'* ]]; }
 router_pids()  { pgrep -f 'ccms/router\.js' 2>/dev/null || true; }
 
@@ -254,6 +271,13 @@ ${C}接入${N}
       <provider>             列出可用模型
   --list/-l                  列出 provider
 
+${C}密钥库${N}
+  --vault
+      --status                   查看加密状态与主密钥
+      --seal                     加密现有明文密钥
+      --open                     输出明文密钥
+      --rekey                    轮换主密钥
+
 ${C}路由${N}
   --route/-r
       --list/-l                          查看路由表
@@ -284,6 +308,8 @@ ${C}文件${N}
   routes.json     $ROUTES
   providers.json  $PROVIDERS
   keys.env        $KEYS
+  keys.enc        $ENC
+  keystore.key    $KEYFILE
   settings.json   $SETTINGS
   stats.json      $STATS
 
@@ -402,6 +428,12 @@ cmd_status() {
   else
     printf '  (文件不存在)\n'
   fi
+  hdr "密钥库"
+  if [[ -f "$ENC" ]]; then
+    node "$KEYSTORE_JS" status 2>/dev/null | sed 's/^/  /' || true
+  else
+    warn "明文存储（keys.env）；ccms --vault --seal 可迁移到加密存储"
+  fi
 }
 
 cmd_list() {
@@ -445,6 +477,26 @@ cmd_key() {
   ok "$p 的密钥池已更新：$(count_keys "$p") 把（新增 $(mask "$arg")）"
 }
 
+cmd_vault() {
+  local raw="${1:-status}"
+  local sub; sub="$(resolve_sub "$raw")"
+  [[ -n "$sub" ]] || die "未知子命令: $raw（ccms --help/-h 看用法）"
+  shift || true
+  command -v node >/dev/null || die "缺少 node，请先: pacman -S nodejs"
+  case "$sub" in
+    status) node "$KEYSTORE_JS" status ;;
+    seal)   node "$KEYSTORE_JS" seal; ok "明文密钥已加密，keys.env 已清空" ;;
+    open)
+      printf '! 以下为明文密钥，注意终端记录与重定向\n' >&2
+      node "$KEYSTORE_JS" open ;;
+    rekey)
+      node "$KEYSTORE_JS" rekey
+      ok "主密钥已轮换"
+      if router_alive; then warn "建议 ccms --router --restart 立即生效"; fi ;;
+    *) die "用法: ccms --vault <--status|--seal|--open|--rekey>" ;;
+  esac
+}
+
 cmd_models() {
   local p="${1:-}"; [[ -n "$p" ]] || die "用法: ccms --models/-m <provider>"
   has_p "$p" || die "未知 provider: $p"
@@ -469,7 +521,7 @@ cmd_test() {
     hdr "POST http://$(router_addr)/v1/messages  model=ccms-haiku"
     local body code
     body="$(mktemp)"
-    code="$(curl -sS -m 60 -o "$body" -w '%{http_code}' "http://$(router_addr)/v1/messages" \
+    code="$(curl -sS -m 60 --noproxy '*' -o "$body" -w '%{http_code}' "http://$(router_addr)/v1/messages" \
       -H 'content-type: application/json' -H 'anthropic-version: 2023-06-01' -H 'x-api-key: ccms-router-local' \
       -d '{"model":"ccms-haiku","max_tokens":16,"messages":[{"role":"user","content":"say ok"}]}' || true)"
     printf 'HTTP %s\n' "$code"; head -c 800 "$body"; echo; rm -f "$body"
@@ -518,6 +570,16 @@ cmd_doctor() {
   for f in "$PROVIDERS" "$KEYS" "$ROUTES" "$ROUTER_JS" "$SETTINGS"; do
     if [[ -f "$f" ]]; then printf '  %-42s %s\n' "$f" "$(stat -c '%a %U' "$f")"; else printf '  %-42s %s缺失%s\n' "$f" "$Y" "$N"; fi
   done
+  for f in "$ENC" "$KEYFILE"; do
+    if [[ -f "$f" ]]; then printf '  %-42s %s\n' "$f" "$(stat -c '%a %U' "$f")"; fi
+  done
+  hdr "密钥库"
+  if [[ -f "$ENC" ]]; then
+    ok "加密存储已启用  $ENC"
+    node "$KEYSTORE_JS" status 2>/dev/null | sed 's/^/  /' || true
+  else
+    warn "明文存储  $KEYS（ccms --vault --seal 加密）"
+  fi
   hdr "Key"
   load_keys
   local p
@@ -555,6 +617,9 @@ main() {
     --status)    cmd_status ;;
     -l|--list)   cmd_list ;;
     -k|--key)    cmd_key "${pos[0]:-}" "${pos[1]:-}" ;;
+    --vault)
+      local vsub="${pos[0]:-status}"; vsub="${vsub#--}"
+      cmd_vault "$vsub" "${pos[@]:1}" ;;
     -m|--models) cmd_models "${pos[0]:-}" ;;
     -t|--test)   cmd_test "${pos[0]:-}" ;;
     -d|--doctor) cmd_doctor ;;

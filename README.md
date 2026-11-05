@@ -33,6 +33,7 @@ claude
 | 查看模式和路由 | `ccms`、`ccms --status` |
 | 启用 / 关闭路由 | `ccms --on/-a`、`ccms --off/-o` |
 | 添加 / 查看 / 清空密钥 | `ccms --key/-k <provider> <api-key>`、`... list`、`... clear` |
+| 管理加密密钥库 | `ccms --vault`（`--status` / `--seal` / `--open` / `--rekey`） |
 | 查看 provider | `ccms --list/-l` |
 | 拉取端点模型列表 | `ccms --models/-m <provider>` |
 | 查看路由表 | `ccms --route/-r --list/-l` |
@@ -55,8 +56,32 @@ ccms --router --restart
 ```
 
 密钥池支持为每个 provider 配置多把密钥，以英文逗号分隔；请求失败时会轮换。
-真实密钥只保存在 `~/.config/ccms/keys.env`（权限 600）。`ccms --key` 会立即重新加载，
-旧式单密钥写法仍然兼容。
+`ccms --key <provider> <api-key>` 追加密钥，`list` 查看掩码，`clear` 清空。
+
+### 加密存储
+
+真实密钥以 **AES-256-GCM** 加密保存在 `~/.config/ccms/keys.enc`（权限 600），
+主密钥与密文分离：
+
+| 模式 | 主密钥 | 启用方式 |
+|---|---|---|
+| `keyfile`（默认） | `~/.config/ccms/keystore.key`，32 字节随机，权限 600 | 首次 `ccms --key` 自动生成，无需交互 |
+| `passphrase` | `CCMS_KEYSTORE_PASSPHRASE` 经 scrypt 派生，不落盘 | 首次写入前设置该环境变量 |
+
+```bash
+ccms --vault --status     # 查看加密状态与主密钥来源
+ccms --vault --seal       # 把已有明文 keys.env 加密迁移
+ccms --vault --open       # 输出明文，谨慎使用
+ccms --vault --rekey      # 轮换主密钥 / 切换模式
+```
+
+首次 `ccms --key` 会自动把现存明文 `keys.env` 迁移进加密库并清空该文件；
+尚未启用加密时仍兼容明文 `keys.env` 与旧式单密钥写法。`keys.enc` 由路由器每次请求现读，
+改完即时生效。
+
+> `keyfile` 模式下 `keys.enc` 与 `keystore.key` 必须一起备份，缺一不可解。
+> `passphrase` 模式下所有读取方（含后台 router 与自动拉起它的 shell）都必须能拿到
+> `CCMS_KEYSTORE_PASSPHRASE`，否则解密失败、请求返回 401。
 
 重试行为由 `routes.json` 的 `retry` 段控制：
 
@@ -97,15 +122,16 @@ sudo ./install.sh
 ./scripts/validate.sh
 ```
 
-安装脚本会部署 CLI、路由器和默认配置；不会覆盖已有的
-`routes.json`、`providers.json` 或 `keys.env`。真实密钥只保存在
-`~/.config/ccms/keys.env`，不进入 Git。
+安装脚本会部署 CLI、路由器、加密密钥库和默认配置；不会覆盖已有的
+`routes.json`、`providers.json`、`keys.enc` 或 `keystore.key`。
+密钥在首次 `ccms --key` 时写入加密库，不进入 Git。
 
 源码结构：
 
 ```text
 bin/ccms                 CLI
 lib/ccms/router.js       路由器
+lib/ccms/keystore.js     加密密钥库
 lib/ccms/stats.js        用量统计
 config/                 默认配置与密钥模板
 install.sh              安装
@@ -115,7 +141,8 @@ scripts/validate.sh     隔离验证
 ## 注意
 
 - 路由器只监听 `127.0.0.1`，不要改为对外地址。
-- 路由模式下 Claude Code 侧使用占位 token，真实密钥只在 `keys.env`。
+- 路由模式下 Claude Code 侧使用占位 token，真实密钥只在加密库 `keys.enc`。
+- 备份 `keys.enc` 时务必一并备份 `keystore.key`（口令模式除外），缺一不可解。
 - 上游必须兼容 Anthropic Messages 协议。
 - 切换后必须新开 Claude Code 进程。
 - 第三方密钥的计费与额度由对应服务决定。
