@@ -6,21 +6,20 @@ CCMS 按请求档位把请求转发到配置好的 Anthropic 兼容端点，并�
 ## 工作方式
 
 共五个逻辑档位：`fable`、`opus`、`sonnet`、`haiku`、`subagent`。
-Claude Code 使用哨兵模型名 `ccx-<tier>`，路由器将其替换为 `routes.json`
+Claude Code 使用哨兵模型名 `ccms-<tier>`，路由器将其替换为 `routes.json`
 中对应档位的真实 `<provider>/<model>`。
 
 - `Mode`：`Claude` 为官方直连，`Router` 为本地路由。
 - `Default`：默认档位与 effort。
 - 路由表与 provider 均可配置，不绑定特定供应商或模型。
-- 整个会话只走一家时，可用 `ccx --route/-r --all <provider> [model]`。
 
 ## 快速开始
 
 ```bash
-ccx --key <provider> <api-key>
-ccx --test <provider>
-ccx --on
-ccx --test router
+ccms --key <provider> <api-key>
+ccms --test <provider>
+ccms --on
+ccms --test router
 claude
 ```
 
@@ -31,20 +30,20 @@ claude
 
 | 目的 | 命令 |
 |---|---|
-| 查看模式和路由 | `ccx`、`ccx --status` |
-| 启用 / 关闭路由 | `ccx --on/-a`、`ccx --off/-o` |
-| 添加 / 查看 / 清空密钥 | `ccx --key/-k <provider> <api-key>`、`... list`、`... clear` |
-| 查看 provider | `ccx --list/-l` |
-| 拉取端点模型列表 | `ccx --models/-m <provider>` |
-| 查看路由表 | `ccx --route/-r --list/-l` |
-| 修改 / 删除路由 | `ccx --route/-r --set <tier> <provider> <model>`、`--unset <tier>` |
-| 五档统一到一家 | `ccx --route/-r --all <provider> [model]` |
-| 管理路由器 | `ccx --router`（start / stop / restart / status / logs [n]） |
-| 验证链路 | `ccx --test/-t`（provider 或 router） |
-| 环境自检 | `ccx --doctor/-d` |
-| 用量统计 | `ccx --stats/-u [days]`、`--json`、`reset` |
+| 查看模式和路由 | `ccms`、`ccms --status` |
+| 启用 / 关闭路由 | `ccms --on/-a`、`ccms --off/-o` |
+| 添加 / 查看 / 清空密钥 | `ccms --key/-k <provider> <api-key>`、`... list`、`... clear` |
+| 查看 provider | `ccms --list/-l` |
+| 拉取端点模型列表 | `ccms --models/-m <provider>` |
+| 查看路由表 | `ccms --route/-r --list/-l` |
+| 修改 / 删除路由 | `ccms --route/-r --set <tier> <provider> <model>`、`--unset <tier>` |
+| 五档统一到一家 | `ccms --route/-r --all <provider> [model]` |
+| 管理路由器 | `ccms --router`（start / stop / restart / status / logs [n]） |
+| 验证链路 | `ccms --test/-t`（provider 或 router） |
+| 环境自检 | `ccms --doctor/-d` |
+| 用量统计 | `ccms --stats/-u [days]`、`--json`、`reset` |
 
-完整参数见 `ccx --help`。
+完整参数见 `ccms --help`。
 
 ## 配置与密钥
 
@@ -52,11 +51,11 @@ claude
 路由器只在启动时读取该文件，修改后执行：
 
 ```bash
-ccx --router --restart
+ccms --router --restart
 ```
 
 密钥池支持为每个 provider 配置多把密钥，以英文逗号分隔；请求失败时会轮换。
-真实密钥只保存在 `~/.config/ccx/keys.env`（权限 600）。`ccx --key` 会立即重新加载，
+真实密钥只保存在 `~/.config/ccms/keys.env`（权限 600）。`ccms --key` 会立即重新加载，
 旧式单密钥写法仍然兼容。
 
 重试行为由 `routes.json` 的 `retry` 段控制：
@@ -78,10 +77,10 @@ ccx --router --restart
 记录请求数、输入/输出 token、缓存 token 和重试次数，按本地日期保留 180 天：
 
 ```bash
-ccx --stats           # 今日 + 最近 7 天
-ccx --stats 30        # 最近 30 天
-ccx --stats --json    # 机器可读
-ccx --stats reset     # 清空
+ccms --stats           # 今日 + 最近 7 天
+ccms --stats 30        # 最近 30 天
+ccms --stats --json    # 机器可读
+ccms --stats reset     # 清空
 ```
 
 统计只包含 token 与请求数，不计算费用。
@@ -100,14 +99,14 @@ sudo ./install.sh
 
 安装脚本会部署 CLI、路由器和默认配置；不会覆盖已有的
 `routes.json`、`providers.json` 或 `keys.env`。真实密钥只保存在
-`~/.config/ccx/keys.env`，不进入 Git。
+`~/.config/ccms/keys.env`，不进入 Git。
 
 源码结构：
 
 ```text
-bin/ccx                 CLI
-lib/ccx/router.js       路由器
-lib/ccx/stats.js        用量统计
+bin/ccms                 CLI
+lib/ccms/router.js       路由器
+lib/ccms/stats.js        用量统计
 config/                 默认配置与密钥模板
 install.sh              安装
 scripts/validate.sh     隔离验证

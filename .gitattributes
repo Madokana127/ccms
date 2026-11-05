@@ -3,7 +3,7 @@
 .gitattributes text eol=lf
 .gitignore text eol=lf
 *.sh text eol=lf
-bin/ccx text eol=lf
+bin/ccms text eol=lf
 *.js text eol=lf
 *.json text eol=lf
 *.md text eol=lf

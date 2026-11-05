@@ -33,6 +33,6 @@
     "haiku": "qwen3-coder-plus",
     "fable": "qwen3-coder-plus",
     "subagent": "qwen3-coder-plus",
-    "note": "阿里云百炼 MaaS 网关；模型 ID 以 ccx models qwen 返回为准"
+    "note": "阿里云百炼 MaaS 网关；模型 ID 以 ccms models qwen 返回为准"
   }
 }

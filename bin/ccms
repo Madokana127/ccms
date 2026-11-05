@@ -1,23 +1,23 @@
 #!/usr/bin/env bash
 # 适用于Claude Code的Provider自由切换工具
-# 用法: ccx --help
+# 用法: ccms --help
 set -euo pipefail
 
-CCX_HOME="${CCX_HOME:-$HOME/.config/ccx}"
-PROVIDERS="$CCX_HOME/providers.json"
-KEYS="$CCX_HOME/keys.env"
-STATE="$CCX_HOME/state.json"
-ROUTES="$CCX_HOME/routes.json"
-ROUTER_JS="${CCX_ROUTER_JS:-/usr/local/lib/ccx/router.js}"
-STATS_JS="${CCX_STATS_JS:-/usr/local/lib/ccx/stats.js}"
-STATS="$CCX_HOME/stats.json"
-ROUTER_LOG="$CCX_HOME/router.log"
-ROUTER_PID="$CCX_HOME/router.pid"
+CCMS_HOME="${CCMS_HOME:-$HOME/.config/ccms}"
+PROVIDERS="$CCMS_HOME/providers.json"
+KEYS="$CCMS_HOME/keys.env"
+STATE="$CCMS_HOME/state.json"
+ROUTES="$CCMS_HOME/routes.json"
+ROUTER_JS="${CCMS_ROUTER_JS:-/usr/local/lib/ccms/router.js}"
+STATS_JS="${CCMS_STATS_JS:-/usr/local/lib/ccms/stats.js}"
+STATS="$CCMS_HOME/stats.json"
+ROUTER_LOG="$CCMS_HOME/router.log"
+ROUTER_PID="$CCMS_HOME/router.pid"
 SETTINGS="${CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
 
-CCX_BRAND="CCMS"
-CCX_NAME="Claude Code Model Switcher"
-CCX_VERSION="0.1.0"
+CCMS_BRAND="CCMS"
+CCMS_NAME="Claude Code Model Switcher"
+CCMS_VERSION="0.1.0"
 
 R=$'\033[31m'; G=$'\033[32m'; Y=$'\033[33m'; C=$'\033[36m'; D=$'\033[2m'; N=$'\033[0m'
 B=$'\033[1m'; M=$'\033[36m'; T=""
@@ -46,7 +46,7 @@ command -v curl >/dev/null || die "缺少 curl"
 
 [[ -f "$PROVIDERS" ]] || die "找不到 $PROVIDERS"
 [[ -f "$ROUTES" ]] || die "找不到 $ROUTES"
-[[ -f "$KEYS" ]] || { mkdir -p "$CCX_HOME"; touch "$KEYS"; chmod 600 "$KEYS"; }
+[[ -f "$KEYS" ]] || { mkdir -p "$CCMS_HOME"; touch "$KEYS"; chmod 600 "$KEYS"; }
 
 names()  { jq -r 'keys[]' "$PROVIDERS"; }
 has_p()  { jq -e --arg p "$1" 'has($p)' "$PROVIDERS" >/dev/null 2>&1; }
@@ -113,15 +113,15 @@ ensure_settings() {
 # ---------- router helpers ----------
 router_addr()  { jq -r '.listen // "127.0.0.1:8788"' "$ROUTES" 2>/dev/null || echo "127.0.0.1:8788"; }
 router_port()  { router_addr | awk -F: '{print $NF}'; }
-router_probe() { curl -sS -m 2 "http://127.0.0.1:$(router_port)/ccx/health" 2>/dev/null; }
+router_probe() { curl -sS -m 2 "http://127.0.0.1:$(router_port)/ccms/health" 2>/dev/null; }
 router_alive() { [[ "$(router_probe)" == *'"ok":true'* ]]; }
-router_pids()  { pgrep -f 'ccx/router\.js' 2>/dev/null || true; }
+router_pids()  { pgrep -f 'ccms/router\.js' 2>/dev/null || true; }
 
 router_start() {
   command -v node >/dev/null || die "缺少 node，请先: pacman -S nodejs"
   [[ -f "$ROUTER_JS" ]] || die "找不到 $ROUTER_JS"
   if router_alive; then ok "router 已在运行  http://$(router_addr)"; return 0; fi
-  mkdir -p "$CCX_HOME"
+  mkdir -p "$CCMS_HOME"
   if [[ -f "$ROUTER_LOG" ]] && (( $(stat -c %s "$ROUTER_LOG") > 5*1024*1024 )); then
     mv -f "$ROUTER_LOG" "$ROUTER_LOG.1"
   fi
@@ -141,7 +141,7 @@ router_stop() {
   # shellcheck disable=SC2086
   kill $pids 2>/dev/null || true
   for _ in 1 2 3 4 5; do sleep 0.2; [[ -z "$(router_pids)" ]] && break; done
-  if [[ -n "$(router_pids)" ]]; then pkill -9 -f 'ccx/router\.js' 2>/dev/null || true; fi
+  if [[ -n "$(router_pids)" ]]; then pkill -9 -f 'ccms/router\.js' 2>/dev/null || true; fi
   rm -f "$ROUTER_PID"
   ok "router 已停止"
 }
@@ -149,7 +149,7 @@ router_stop() {
 cmd_router() {
   local raw="${1:-status}"
   local sub; sub="$(resolve_sub "$raw")"
-  [[ -n "$sub" ]] || die "未知子命令: $raw（ccx --router 看用法）"
+  [[ -n "$sub" ]] || die "未知子命令: $raw（ccms --router 看用法）"
   shift || true
   case "$sub" in
     start)   router_start ;;
@@ -157,7 +157,7 @@ cmd_router() {
     restart) router_stop; router_start ;;
     ensure)  router_alive || router_start >/dev/null 2>&1 || true ;;
     status)
-      hdr "ccx router"
+      hdr "ccms router"
       if router_alive; then
         ok "运行中  http://$(router_addr)"
         local h; h="$(router_probe)"
@@ -166,18 +166,18 @@ cmd_router() {
         echo "  路由表："
         jq -r '.routes | to_entries[] | "\(.key)\t\(.value.provider)/\(.value.model)"' <<<"$h" | awk -F'\t' '{printf "    %-10s → %s\n", $1, $2}'
       else
-        warn "未运行（ccx --router start）"
+        warn "未运行（ccms --router start）"
       fi
       ;;
     logs) tail -n "${1:-40}" "$ROUTER_LOG" 2>/dev/null || echo "(暂无日志)" ;;
-    *) die "用法: ccx --router <start|stop|restart|status|logs>" ;;
+    *) die "用法: ccms --router <start|stop|restart|status|logs>" ;;
   esac
 }
 
 cmd_route() {
   local raw="${1:-list}"
   local sub; sub="$(resolve_sub "$raw")"
-  [[ -n "$sub" ]] || die "未知子命令: $raw（ccx --route/-r 看用法）"
+  [[ -n "$sub" ]] || die "未知子命令: $raw（ccms --route/-r 看用法）"
   shift || true
   case "$sub" in
     list|"")
@@ -187,22 +187,22 @@ cmd_route() {
       ;;
     set)
       local tier="${1:-}" prov="${2:-}" model="${3:-}"
-      [[ -n "$tier" && -n "$prov" && -n "$model" ]] || die "用法: ccx --route/-r set <tier> <provider> <model>"
+      [[ -n "$tier" && -n "$prov" && -n "$model" ]] || die "用法: ccms --route/-r set <tier> <provider> <model>"
       has_p "$prov" || die "未知 provider: $prov（可用: $(names | tr '\n' ' ')）"
       local tmp; tmp="$(mktemp)"
       jq --arg t "$tier" --arg p "$prov" --arg m "$model" '.routes[$t] = {provider:$p, model:$m}' "$ROUTES" > "$tmp" && mv "$tmp" "$ROUTES"
       ok "$tier → $prov/$model"
-      if router_alive; then warn "需 ccx --router --restart 生效"; fi
+      if router_alive; then warn "需 ccms --router --restart 生效"; fi
       ;;
     unset)
-      local tier="${1:-}"; [[ -n "$tier" ]] || die "用法: ccx --route/-r unset <tier>"
+      local tier="${1:-}"; [[ -n "$tier" ]] || die "用法: ccms --route/-r unset <tier>"
       local tmp; tmp="$(mktemp)"
       jq --arg t "$tier" 'del(.routes[$t])' "$ROUTES" > "$tmp" && mv "$tmp" "$ROUTES"
       ok "已删除路由 $tier"
       ;;
     all)
       local prov="${1:-}" model="${2:-}"
-      [[ -n "$prov" ]] || die "用法: ccx --route/-r all <provider> [model]"
+      [[ -n "$prov" ]] || die "用法: ccms --route/-r all <provider> [model]"
       has_p "$prov" || die "未知 provider: $prov（可用: $(names | tr '\n' ' ')）"
       local tmp; tmp="$(mktemp)"
       if [[ -n "$model" ]]; then
@@ -225,19 +225,19 @@ cmd_route() {
       mv "$tmp" "$ROUTES"
       ok "五个档位已统一到 $prov"
       jq -r '.routes | to_entries[] | "  \(.key) → \(.value.provider)/\(.value.model)"' "$ROUTES"
-      if router_alive; then warn "需 ccx --router --restart 生效"; fi
+      if router_alive; then warn "需 ccms --router --restart 生效"; fi
       ;;
-    *) die "用法: ccx --route/-r <list|set|unset|all>" ;;
+    *) die "用法: ccms --route/-r <list|set|unset|all>" ;;
   esac
 }
 
 # ---------- commands ----------
 cmd_help() {
   cat <<EOF
-${C}${CCX_BRAND}${N} — ${CCX_NAME}  v${CCX_VERSION}
+${C}${CCMS_BRAND}${N} — ${CCMS_NAME}  v${CCMS_VERSION}
 适用于Claude Code的Provider自由切换工具
 
-${C}用法${N}  ccx [--命令/-x] [参数]
+${C}用法${N}  ccms [--命令/-x] [参数]
       不带参数仅显示模式与路由
 
 ${C}模式${N}
@@ -288,14 +288,14 @@ ${C}文件${N}
   stats.json      $STATS
 
 ${C}示例${N}
-  ccx --key kimi sk-xxx
-  ccx --route/-r --all qwen
-  ccx --on
+  ccms --key kimi sk-xxx
+  ccms --route/-r --all qwen
+  ccms --on
 EOF
 }
 
 cmd_version() {
-  printf '%s %s — %s\n' "$CCX_BRAND" "$CCX_VERSION" "$CCX_NAME"
+  printf '%s %s — %s\n' "$CCMS_BRAND" "$CCMS_VERSION" "$CCMS_NAME"
 }
 
 cmd_dashboard() {
@@ -341,24 +341,24 @@ TIERS
 }
 
 cmd_on() {
-  router_start >/dev/null || die "router 起不来，看 ccx --router logs"
+  router_start >/dev/null || die "router 起不来，看 ccms --router logs"
   ensure_settings
   local addr; addr="http://$(router_addr)"
   local effort; effort="$(jq -r '.effort // "high"' "$ROUTES")"
   local envjson
   envjson="$(jq -n --arg base "$addr" --arg effort "$effort" '{
     ANTHROPIC_BASE_URL:$base,
-    ANTHROPIC_AUTH_TOKEN:"ccx-router-local",
-    ANTHROPIC_MODEL:"ccx-sonnet",
-    ANTHROPIC_DEFAULT_OPUS_MODEL:"ccx-opus",
-    ANTHROPIC_DEFAULT_SONNET_MODEL:"ccx-sonnet",
-    ANTHROPIC_DEFAULT_HAIKU_MODEL:"ccx-haiku",
-    ANTHROPIC_DEFAULT_FABLE_MODEL:"ccx-fable",
-    ANTHROPIC_SMALL_FAST_MODEL:"ccx-haiku",
-    CLAUDE_CODE_SUBAGENT_MODEL:"ccx-subagent",
+    ANTHROPIC_AUTH_TOKEN:"ccms-router-local",
+    ANTHROPIC_MODEL:"ccms-sonnet",
+    ANTHROPIC_DEFAULT_OPUS_MODEL:"ccms-opus",
+    ANTHROPIC_DEFAULT_SONNET_MODEL:"ccms-sonnet",
+    ANTHROPIC_DEFAULT_HAIKU_MODEL:"ccms-haiku",
+    ANTHROPIC_DEFAULT_FABLE_MODEL:"ccms-fable",
+    ANTHROPIC_SMALL_FAST_MODEL:"ccms-haiku",
+    CLAUDE_CODE_SUBAGENT_MODEL:"ccms-subagent",
     CLAUDE_CODE_EFFORT_LEVEL:$effort,
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:"1"}')"
-  cp "$SETTINGS" "$SETTINGS.ccx.bak"; chmod 600 "$SETTINGS.ccx.bak"
+  cp "$SETTINGS" "$SETTINGS.ccms.bak"; chmod 600 "$SETTINGS.ccms.bak"
   local tmp; tmp="$(mktemp)"
   jq --argjson e "$envjson" '.env = (((.env // {}) | del(.ANTHROPIC_API_KEY)) + $e)
      | (if ((.model // "") == "" or (.model // "") == "haiku") then .model = "sonnet" else . end)' "$SETTINGS" > "$tmp" && mv "$tmp" "$SETTINGS"
@@ -371,7 +371,7 @@ cmd_on() {
 
 cmd_off() {
   ensure_settings
-  cp "$SETTINGS" "$SETTINGS.ccx.bak"; chmod 600 "$SETTINGS.ccx.bak"
+  cp "$SETTINGS" "$SETTINGS.ccms.bak"; chmod 600 "$SETTINGS.ccms.bak"
   local tmp; tmp="$(mktemp)"
   jq 'if .env then
         del(.env.ANTHROPIC_BASE_URL, .env.ANTHROPIC_AUTH_TOKEN, .env.ANTHROPIC_API_KEY,
@@ -417,7 +417,7 @@ cmd_list() {
 
 cmd_key() {
   local p="${1:-}" arg="${2:-}"
-  [[ -n "$p" ]] || die "用法: ccx --key/-k <provider> <sk-...|list|clear>"
+  [[ -n "$p" ]] || die "用法: ccms --key/-k <provider> <sk-...|list|clear>"
   has_p "$p" || die "未知 provider: $p"
   load_keys
   local var; var="$(pool_var "$p")"
@@ -446,7 +446,7 @@ cmd_key() {
 }
 
 cmd_models() {
-  local p="${1:-}"; [[ -n "$p" ]] || die "用法: ccx --models/-m <provider>"
+  local p="${1:-}"; [[ -n "$p" ]] || die "用法: ccms --models/-m <provider>"
   has_p "$p" || die "未知 provider: $p"
   load_keys
   local key base; key="$(key_for "$p")"; base="$(strip_slash "$(getp "$p" base_url)")"
@@ -461,19 +461,19 @@ cmd_models() {
 }
 
 cmd_test() {
-  local p="${1:-}"; [[ -n "$p" ]] || die "用法: ccx --test/-t <provider|router>"
+  local p="${1:-}"; [[ -n "$p" ]] || die "用法: ccms --test/-t <provider|router>"
   load_keys
 
   if [[ "$p" == "router" ]]; then
-    router_alive || die "router 未运行（ccx --router start）"
-    hdr "POST http://$(router_addr)/v1/messages  model=ccx-haiku"
+    router_alive || die "router 未运行（ccms --router start）"
+    hdr "POST http://$(router_addr)/v1/messages  model=ccms-haiku"
     local body code
     body="$(mktemp)"
     code="$(curl -sS -m 60 -o "$body" -w '%{http_code}' "http://$(router_addr)/v1/messages" \
-      -H 'content-type: application/json' -H 'anthropic-version: 2023-06-01' -H 'x-api-key: ccx-router-local' \
-      -d '{"model":"ccx-haiku","max_tokens":16,"messages":[{"role":"user","content":"say ok"}]}' || true)"
+      -H 'content-type: application/json' -H 'anthropic-version: 2023-06-01' -H 'x-api-key: ccms-router-local' \
+      -d '{"model":"ccms-haiku","max_tokens":16,"messages":[{"role":"user","content":"say ok"}]}' || true)"
     printf 'HTTP %s\n' "$code"; head -c 800 "$body"; echo; rm -f "$body"
-    [[ "$code" == "200" ]] && ok "路由链路可用" || warn "看 ccx --router --logs"
+    [[ "$code" == "200" ]] && ok "路由链路可用" || warn "看 ccms --router --logs"
     return 0
   fi
 
@@ -565,7 +565,7 @@ main() {
     --router)
       local rsub="${pos[0]:-status}"; rsub="${rsub#--}"
       cmd_router "$rsub" "${pos[@]:1}" ;;
-    *) die "未知命令: $flag（ccx --help/-h 看用法）" ;;
+    *) die "未知命令: $flag（ccms --help/-h 看用法）" ;;
   esac
 }
 main "$@"
