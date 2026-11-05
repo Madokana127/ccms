@@ -1,0 +1,38 @@
+{
+  "deepseek": {
+    "label": "DeepSeek",
+    "base_url": "https://api.deepseek.com/anthropic",
+    "key_env": "DEEPSEEK_API_KEY",
+    "model": "deepseek-v4-pro",
+    "opus": "deepseek-v4-pro",
+    "sonnet": "deepseek-v4-pro",
+    "haiku": "deepseek-flash",
+    "fable": "deepseek-v4-pro",
+    "subagent": "deepseek-flash",
+    "note": "官方 Anthropic 兼容端点；实测可用 ID: deepseek-v4-pro / deepseek-flash"
+  },
+  "kimi": {
+    "label": "Kimi (Moonshot)",
+    "base_url": "https://api.moonshot.cn/anthropic",
+    "key_env": "KIMI_API_KEY",
+    "model": "kimi-k3.1-pro",
+    "opus": "kimi-k3.1-pro",
+    "sonnet": "kimi-k3.1-pro",
+    "haiku": "kimi-k3.1-pro-highspeed",
+    "fable": "kimi-k3.1-pro",
+    "subagent": "kimi-k3.1-pro",
+    "note": "可用 ID: kimi-k3.1-pro / kimi-k3.1-pro-highspeed / kimi-k3"
+  },
+  "qwen": {
+    "label": "千问 MaaS",
+    "base_url": "https://maas.qianwenaiapi.com/apps/anthropic",
+    "key_env": "QWEN_API_KEY",
+    "model": "qwen3-coder-plus",
+    "opus": "qwen3-coder-plus",
+    "sonnet": "qwen3-coder-plus",
+    "haiku": "qwen3-coder-plus",
+    "fable": "qwen3-coder-plus",
+    "subagent": "qwen3-coder-plus",
+    "note": "阿里云百炼 MaaS 网关；模型 ID 以 ccx models qwen 返回为准"
+  }
+}

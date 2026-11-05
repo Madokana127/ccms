@@ -1,0 +1,18 @@
+# 本地项目说明与构建记录，不提交
+/PROJECT.md
+
+# 真实运行配置和状态，不提交
+/config/keys.env
+/config/state.json
+/config/stats.json
+/config/router.log
+/config/router.log.*
+/config/router.pid
+
+# 通用本地文件
+.env
+.env.*
+*.swp
+*.tmp
+.DS_Store
+Thumbs.db

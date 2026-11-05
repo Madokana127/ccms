@@ -1,0 +1,13 @@
+CCMS
+Mode <Claude/Router>
+Defult <tier> <effort>
+Route List
+    Fable   -> <provider>/<model_id>
+    Opus    -> <provider>/<model_id>
+    Sonnet  -> <provider>/<model_id>
+    Haiku   -> <provider>/<model_id>
+    subagent-> <provider>/<model_id>
+API Key
+    <key_state><provider1>
+    <key_state><provider2>
+    ...
