@@ -5,15 +5,15 @@
   "retry": {
     "attempts": 3,
     "backoff_ms": 400,
-    "timeout_ms": 120000,
+    "response_timeout_ms": 120000,
     "connect_timeout_ms": 15000,
     "retry_on": [401, 403, 408, 429, 500, 502, 503, 504]
   },
   "routes": {
+    "fable": { "provider": "kimi", "model": "kimi-k3.1-pro" },
     "opus": { "provider": "kimi", "model": "kimi-k3.1-pro" },
     "sonnet": { "provider": "qwen", "model": "qwen3-coder-plus" },
     "haiku": { "provider": "deepseek", "model": "deepseek-flash" },
-    "fable": { "provider": "kimi", "model": "kimi-k3.1-pro" },
     "subagent": { "provider": "deepseek", "model": "deepseek-flash" }
   }
 }

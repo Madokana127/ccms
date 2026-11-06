@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "cipher": "aes-256-gcm",
+  "mode": "keyfile",
+  "iv": "CgwGyb63N4GNFRTm",
+  "tag": "ApVNohWIa5tB7HqI/W3MNw==",
+  "data": "zNmvAGLgu9AWpxeAl0HOr8DZqz2FRrn939/B8YmWQBx9tePpOSn9Ea5/BmrT77x04sXu9g==",
+  "updated": "2026-11-06T00:30:18.699Z"
+}

@@ -1,3 +1,6 @@
+# 构建产物
+/target/
+
 # 本地项目说明与构建记录，不提交
 /PROJECT.md
 
@@ -10,6 +13,7 @@
 /config/router.log
 /config/router.log.*
 /config/router.pid
+*.ccms.bak
 
 # 通用本地文件
 .env

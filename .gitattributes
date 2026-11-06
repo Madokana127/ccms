@@ -3,9 +3,16 @@
 .gitattributes text eol=lf
 .gitignore text eol=lf
 *.sh text eol=lf
-bin/ccms text eol=lf
+*.ps1 text eol=crlf
+*.rs text eol=lf
+*.toml text eol=lf
+*.fish text eol=lf
 *.js text eol=lf
 *.json text eol=lf
 *.md text eol=lf
 *.txt text eol=lf
 *.example text eol=lf
+Cargo.lock text eol=lf
+
+# 密钥库兼容性样本：按字节保真，不做行尾转换
+tests/fixtures/** -text
