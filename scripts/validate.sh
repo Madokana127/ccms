@@ -75,12 +75,12 @@ sed "s/127.0.0.1:8788/127.0.0.1:$PORT/" "$CCMS_HOME/routes.json" > "$CCMS_HOME/r
 mv "$CCMS_HOME/routes.tmp" "$CCMS_HOME/routes.json"
 
 # ---------- 版本 / 帮助 / 首页 ----------
-equals "CCMS 0.2.0 — Claude Code Model Switcher" "$("$BIN" -v)" "旧式 -v"
-equals "CCMS 0.2.0 — Claude Code Model Switcher" "$("$BIN" --version)" "旧式 --version"
+equals "CCMS 0.2.1 — Claude Code Model Switcher" "$("$BIN" -v)" "旧式 -v"
+equals "CCMS 0.2.1 — Claude Code Model Switcher" "$("$BIN" --version)" "旧式 --version"
 
 for hflag in -h --help; do
   HELP="$("$BIN" "$hflag")"
-  expect "CCMS — Claude Code Model Switcher  v0.2.0" "$HELP" "$hflag 旧式头部"
+  expect "CCMS — Claude Code Model Switcher  v0.2.1" "$HELP" "$hflag 旧式头部"
   expect "适用于Claude Code的Provider自由切换工具" "$HELP" "$hflag 旧 tagline"
   expect "ccms [--命令/-x] [参数]" "$HELP" "$hflag 旧式用法"
   refute "Commands:" "$HELP" "$hflag 不显示 clap Commands"
@@ -106,11 +106,11 @@ equals "提示  ccms --help/-h" "$(printf '%s\n' "$DASH" | tail -n1)" "首页结
 refute $'\033' "$DASH" "首页无 ANSI"
 
 # ---------- 密钥池 + 加密 ----------
-"$BIN" key kimi sk-test-alpha >/dev/null
+"$BIN" --key kimi sk-test-alpha >/dev/null
 "$BIN" --key kimi sk-test-beta >/dev/null
-expect "sk-tes" "$("$BIN" key kimi list)" "密钥掩码展示"
+expect "sk-tes" "$("$BIN" --key kimi list)" "密钥掩码展示"
 expect "sk-tes" "$("$BIN" --key kimi list)" "旧式 --key list"
-COUNT="$("$BIN" key kimi list | grep -c '…' || true)"
+COUNT="$("$BIN" --key kimi list | grep -c '…' || true)"
 [[ "$COUNT" == "2" ]] && ok "密钥池计数 = 2" || bad "密钥池计数应为 2，实际 $COUNT"
 
 [[ -f "$CCMS_HOME/keys.enc" ]] && ok "已生成 keys.enc" || bad "缺少 keys.enc"
@@ -118,28 +118,28 @@ COUNT="$("$BIN" key kimi list | grep -c '…' || true)"
 [[ "$(perms "$CCMS_HOME/keys.enc")" == "600" ]] && ok "keys.enc 权限 600" || bad "keys.enc 权限不是 600"
 [[ "$(perms "$CCMS_HOME/keystore.key")" == "600" ]] && ok "keystore.key 权限 600" || bad "keystore.key 权限不是 600"
 expect "aes-256-gcm" "$("$BIN" --vault --status)" "旧式 --vault --status"
-expect "可解密      是" "$("$BIN" vault status)" "密钥库可解密"
+expect "可解密      是" "$("$BIN" --vault --status)" "密钥库可解密"
 refute "sk-test-alpha" "$(cat "$CCMS_HOME/keys.enc")" "密文里没有明文密钥"
 
-"$BIN" key kimi remove 1 >/dev/null
-COUNT="$("$BIN" key kimi list | grep -c '…' || true)"
+"$BIN" --key kimi remove 1 >/dev/null
+COUNT="$("$BIN" --key kimi list | grep -c '…' || true)"
 [[ "$COUNT" == "1" ]] && ok "remove 生效" || bad "remove 未生效（$COUNT）"
-"$BIN" key kimi clear >/dev/null
-expect "为空" "$("$BIN" key kimi list)" "clear 生效"
+"$BIN" --key kimi clear >/dev/null
+expect "为空" "$("$BIN" --key kimi list)" "clear 生效"
 
 # ---------- stdin 写入（不进入 argv / history） ----------
 printf 'sk-pipe-alpha-123456\nsk-pipe-beta-123456\n' | "$BIN" --key kimi --stdin >/dev/null
 expect "sk-pip" "$("$BIN" --key kimi list)" "旧式 --stdin 写入并掩码"
 refute "sk-pipe-alpha" "$(cat "$CCMS_HOME/keys.enc")" "stdin 写入后密文无明文"
-printf 'sk-modern-pipe-123456\n' | "$BIN" key kimi --stdin >/dev/null
-expect "sk-mod" "$("$BIN" key kimi list)" "新式 key --stdin"
-if printf '  \n' | "$BIN" key kimi --stdin >/dev/null 2>"$TMP/empty-key.err"; then
+printf 'sk-modern-pipe-123456\n' | "$BIN" --key kimi --stdin >/dev/null
+expect "sk-mod" "$("$BIN" --key kimi list)" "旧式 --key --stdin"
+if printf '  \n' | "$BIN" --key kimi --stdin >/dev/null 2>"$TMP/empty-key.err"; then
   bad "空 stdin 应失败"
 else
   ok "空 stdin 被拒绝"
 fi
 expect "stdin 为空" "$(cat "$TMP/empty-key.err")" "空 stdin 提示明确"
-"$BIN" key kimi clear >/dev/null
+"$BIN" --key kimi clear >/dev/null
 
 # ---------- 路由（旧式矩阵） ----------
 for args in "-r -l" "-r --list" "--route list" "--route --list"; do
@@ -157,12 +157,12 @@ if "$BIN" -r -l | grep -q 'Opus.*-/-'; then
 else
   bad "旧式 -r --unset 未生效"
 fi
-"$BIN" route set haiku deepseek deepseek-flash >/dev/null
-expect "deepseek/deepseek-flash" "$("$BIN" route list)" "新式 route set 不回归"
-"$BIN" route all kimi >/dev/null
+"$BIN" --route --set haiku deepseek deepseek-flash >/dev/null
+expect "deepseek/deepseek-flash" "$("$BIN" --route --list)" "旧式 --route --set 覆盖"
+"$BIN" --route --all kimi >/dev/null
 expect "kimi/kimi-k3.1-pro" "$("$BIN" --route --list)" "旧式 --route --all 后仍可读"
 
-if "$BIN" route set nope kimi x >/dev/null 2>&1; then
+if "$BIN" --route --set nope kimi x >/dev/null 2>&1; then
   bad "非法档位应被拒绝"
 else
   ok "非法档位被拒绝"
@@ -199,7 +199,7 @@ PREVIOUS_BEFORE="$(cat "$CCMS_HOME/settings.previous.json")"
 [[ "$(cat "$CCMS_HOME/settings.previous.json")" == "$PREVIOUS_BEFORE" ]] && ok "重复 on 不覆盖前状态" || bad "重复 on 覆盖了前状态"
 expect "运行中" "$("$BIN" --router --status)" "旧式 --router --status"
 expect "运行中" "$("$BIN" --status)" "旧式 --status"
-expect '"router_alive": true' "$("$BIN" status --json)" "新式 status --json 不回归"
+expect '"router_alive": true' "$("$BIN" --status --json)" "旧式 --status --json 覆盖"
 PIDFILE="$(cat "$CCMS_HOME/router.pid")"
 HEALTH="$(curl -sS --noproxy '*' "http://127.0.0.1:$PORT/ccms/health")"
 expect "\"pid\":$PIDFILE" "$HEALTH" "health 报告当前 router pid"
@@ -227,7 +227,7 @@ expect "tail-last-marker" "$TAIL_OUT" "大日志 tail 包含最后标记"
 refute "tail-first-marker" "$TAIL_OUT" "大日志 tail 只读末尾"
 
 "$BIN" --router --restart >/dev/null
-expect "运行中" "$("$BIN" router status)" "router 重启"
+expect "运行中" "$("$BIN" --router --status)" "router 重启"
 "$BIN" --router --stop >/dev/null
 expect "未运行" "$("$BIN" --router --status)" "旧式 --router --stop"
 
@@ -243,10 +243,10 @@ expect "permissions" "$SETTINGS" "off 保留 permissions"
 # ---------- 诊断 / 统计 / 未知命令 ----------
 expect "PROVIDER" "$("$BIN" --list)" "旧式 --list"
 expect "环境" "$("$BIN" --doctor)" "旧式 --doctor"
-expect "0.2.0" "$("$BIN" --doctor)" "doctor 版本"
+expect "0.2.1" "$("$BIN" --doctor)" "doctor 版本"
 expect '"days"' "$("$BIN" --stats --json)" "旧式 --stats --json"
 expect "暂无用量记录" "$("$BIN" -u)" "旧式 -u 空态"
-expect "暂无用量记录" "$("$BIN" stats)" "新式 stats 不回归"
+expect "暂无用量记录" "$("$BIN" --stats)" "旧式 --stats 覆盖"
 expect "明文" "$(rm -f "$CCMS_HOME/keys.enc" "$CCMS_HOME/keystore.key"; "$BIN" --vault --status)" "无密钥库时的提示"
 CORRUPT_STATS='{"version":2,"daily":'
 printf '%s' "$CORRUPT_STATS" > "$CCMS_HOME/stats.json"
@@ -257,10 +257,19 @@ expect_fail "未知命令非零" "$BIN" frobnicate
 expect "未知命令: frobnicate" "$EXPECT_FAIL_OUT" "未知命令中文提示"
 expect "ccms --help/-h 看用法" "$EXPECT_FAIL_OUT" "未知命令提示旧式帮助"
 refute "Usage:" "$EXPECT_FAIL_OUT" "未知命令不泄漏 clap Usage"
-expect_fail "未知子命令非零" "$BIN" --route frob
-expect "未知子命令: frob" "$EXPECT_FAIL_OUT" "未知子命令中文提示"
+expect_fail "未知操作非零" "$BIN" --route frob
+expect "未知操作: frob" "$EXPECT_FAIL_OUT" "未知操作中文提示"
 expect_fail "未知 flag 非零" "$BIN" --bogus
 expect "ccms --help/-h 看用法" "$EXPECT_FAIL_OUT" "未知 flag 提示旧式帮助"
+
+# 0.2 裸子命令已彻底移除：全部按未知命令失败，且只给一行中文提示。
+for word in init on off status list key vault models test route router stats doctor version help; do
+  expect_fail "裸命令 $word 被拒绝" "$BIN" "$word"
+  expect "未知命令: $word" "$EXPECT_FAIL_OUT" "裸命令 $word 中文提示"
+  expect "ccms --help/-h 看用法" "$EXPECT_FAIL_OUT" "裸命令 $word 提示旧式帮助"
+  refute "Usage:" "$EXPECT_FAIL_OUT" "裸命令 $word 不泄漏 clap Usage"
+  refute "Commands:" "$EXPECT_FAIL_OUT" "裸命令 $word 不泄漏 clap Commands"
+done
 
 printf '\n'
 if [[ $FAIL -eq 0 ]]; then

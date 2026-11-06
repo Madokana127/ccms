@@ -80,7 +80,7 @@ chmod 755 "$BIN"
 ok "已安装 $BIN"
 
 printf '== 初始化配置 ==\n'
-"$BIN" init
+"$BIN" --init
 
 PATH_RC=""
 case "$(basename "${SHELL:-bash}")" in
@@ -117,5 +117,5 @@ if [[ -n "$FOUND" && "$FOUND" != "$BIN" ]]; then
   printf '! PATH 里还有另一个 ccms: %s\n' "$FOUND"
   printf '  若那是 0.1 的 Node 版，建议删除它或把它从 PATH 移走\n'
 fi
-printf '下一步: ccms key <provider> sk-...  →  ccms on  →  新开一个 claude\n'
-printf '验证:   ccms doctor && ./scripts/validate.sh\n'
+printf '下一步: ccms --key <provider> sk-...  →  ccms --on  →  新开一个 claude\n'
+printf '验证:   ccms --doctor && ./scripts/validate.sh\n'

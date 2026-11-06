@@ -105,6 +105,19 @@ fn lines(output: &str) -> Vec<&str> {
     output.lines().collect()
 }
 
+fn free_port() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    listener.local_addr().expect("addr").port()
+}
+
+struct RouterGuard<'a>(&'a Ctx);
+
+impl Drop for RouterGuard<'_> {
+    fn drop(&mut self) {
+        let _ = self.0.run(&["--router", "--stop"]);
+    }
+}
+
 #[test]
 fn bare_ccms_is_dashboard_with_main_layout() {
     let ctx = Ctx::new("dashboard");
@@ -150,7 +163,7 @@ fn help_restores_legacy_long_flag_page() {
         let output = ctx.ok(&[flag]);
         assert!(!has_ansi(&output), "非 TTY 不应有 ANSI");
         assert!(
-            output.starts_with("CCMS — Claude Code Model Switcher  v0.2.0\n"),
+            output.starts_with("CCMS — Claude Code Model Switcher  v0.2.1\n"),
             "帮助头部不对：\n{output}"
         );
         assert!(
@@ -198,7 +211,7 @@ fn version_is_single_legacy_line() {
     for flag in ["-v", "--version"] {
         let output = ctx.ok(&[flag]);
         assert_eq!(
-            output, "CCMS 0.2.0 — Claude Code Model Switcher\n",
+            output, "CCMS 0.2.1 — Claude Code Model Switcher\n",
             "{flag} 输出不对"
         );
     }
@@ -214,7 +227,7 @@ fn nested_short_and_long_flags_resolve_like_main() {
         vec!["-r", "--list"],
         vec!["--route", "list"],
         vec!["--route", "--list"],
-        vec!["route", "-l"],
+        vec!["-r", "list"],
     ] {
         let output = ctx.ok(&args);
         assert!(
@@ -291,37 +304,101 @@ fn top_level_legacy_forms_stay_usable() {
 }
 
 #[test]
-fn stats_json_and_modern_commands_do_not_regress() {
-    let ctx = Ctx::new("modern");
+fn every_legacy_top_level_flag_reaches_its_command() {
+    let ctx = Ctx::new("legacy-all");
+    ctx.ok(&["--init"]);
+    ctx.ok(&["--init", "--force"]);
 
-    let output = ctx.ok(&["stats", "--json"]);
+    let port = free_port();
+    let routes_path = ctx.home.join("routes.json");
+    let mut routes: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&routes_path).unwrap()).unwrap();
+    routes["listen"] = serde_json::json!(format!("127.0.0.1:{port}"));
+    std::fs::write(&routes_path, serde_json::to_vec(&routes).unwrap()).unwrap();
+    let _guard = RouterGuard(&ctx);
+
+    assert!(ctx.ok(&["-l"]).contains("PROVIDER"));
+    assert!(ctx.ok(&["--list"]).contains("PROVIDER"));
+    assert!(ctx.ok(&["-k", "kimi", "sk-all-123456"]).contains("密钥池"));
+    assert!(ctx.ok(&["--key", "kimi", "list"]).contains("sk-all"));
+    assert!(ctx.ok(&["-r"]).contains("路由表"));
+    assert!(ctx.ok(&["--route", "--list"]).contains("路由表"));
+    assert!(ctx.ok(&["--vault"]).contains("密钥库"));
+    assert!(ctx
+        .ok(&["-u", "--json"])
+        .parse::<serde_json::Value>()
+        .is_ok());
+    assert!(ctx
+        .ok(&["--stats", "--json"])
+        .parse::<serde_json::Value>()
+        .is_ok());
+    assert!(ctx.ok(&["-d"]).contains("环境"));
+    assert!(ctx.ok(&["--doctor"]).contains("环境"));
+    assert!(ctx.ok(&["-v"]).contains("0.2.1"));
+    assert!(ctx.ok(&["--version"]).contains("0.2.1"));
+    assert!(ctx.ok(&["-h"]).contains("v0.2.1"));
+    assert!(ctx.ok(&["--help"]).contains("v0.2.1"));
+
+    // models / test 先经过参数解析；未知 provider 证明已进入对应命令。
+    for args in [
+        vec!["-m", "ghost"],
+        vec!["--models", "ghost"],
+        vec!["-t", "ghost"],
+        vec!["--test", "ghost"],
+    ] {
+        let stderr = ctx.fail(&args);
+        assert!(
+            stderr.contains("未知 provider"),
+            "ccms {args:?} 应进入 provider 校验：{stderr:?}"
+        );
+    }
+
+    // --on/-a 与 --off/-o 走同一条模式切换路径。
+    assert!(ctx.ok(&["--on"]).contains("路由模式已启用"));
+    assert!(ctx.ok(&["--off"]).contains("已关闭路由"));
+    assert!(ctx.ok(&["-a"]).contains("路由模式已启用"));
+    assert!(ctx.ok(&["-o"]).contains("已关闭路由"));
+
+    // 嵌套进程操作：start / restart / status / logs / stop。
+    assert!(ctx.ok(&["--router", "--start"]).contains("已在运行"));
+    assert!(ctx.ok(&["--router", "--restart"]).contains("已启动"));
+    assert!(ctx.ok(&["--router", "--status"]).contains("运行中"));
+    assert!(ctx.ok(&["--router", "--logs", "3"]).contains("listening"));
+    assert!(ctx.ok(&["--router", "--stop"]).contains("已停止"));
+}
+
+#[test]
+fn stats_json_and_legacy_flags_cover_same_features() {
+    let ctx = Ctx::new("legacy-coverage");
+
+    let output = ctx.ok(&["--stats", "--json"]);
     let value: serde_json::Value = serde_json::from_str(&output).expect("合法 JSON");
     assert!(value.get("days").is_some());
 
-    assert!(ctx.ok(&["stats", "--by", "model"]).contains("用量"));
+    assert!(ctx.ok(&["-u", "--by", "model"]).contains("用量"));
 
-    ctx.ok(&["key", "kimi", "sk-modern-123456"]);
-    assert!(ctx.ok(&["key", "kimi", "list"]).contains("sk-mod"));
+    ctx.ok(&["--key", "kimi", "sk-legacy-123456"]);
+    assert!(ctx.ok(&["-k", "kimi", "list"]).contains("sk-leg"));
 
     assert!(ctx
-        .ok(&["route", "set", "haiku", "deepseek", "deepseek-flash"])
+        .ok(&["--route", "--set", "haiku", "deepseek", "deepseek-flash"])
         .contains("haiku 已更新"));
     assert!(ctx
-        .ok(&["route", "list"])
+        .ok(&["-r", "--list"])
         .contains("deepseek/deepseek-flash"));
     assert!(ctx
-        .ok(&["route", "unset", "haiku"])
+        .ok(&["--route", "--unset", "haiku"])
         .contains("已删除路由 haiku"));
 
-    assert!(ctx.ok(&["vault", "status"]).contains("密钥库"));
-    assert!(ctx.ok(&["router", "logs", "2"]).contains("暂无日志"));
-    assert!(ctx.ok(&["init"]).contains("配置目录"));
+    assert!(ctx.ok(&["--vault", "--status"]).contains("密钥库"));
+    assert!(ctx.ok(&["--router", "--logs", "2"]).contains("暂无日志"));
+    assert!(ctx.ok(&["--init"]).contains("配置目录"));
 }
 
 #[test]
 fn concurrent_key_adds_keep_every_dummy_key() {
     let ctx = Ctx::new("concurrent-add");
-    ctx.ok(&["init"]);
+    ctx.ok(&["--init"]);
 
     const ADDERS: usize = 8;
     std::thread::scope(|scope| {
@@ -329,7 +406,7 @@ fn concurrent_key_adds_keep_every_dummy_key() {
             let ctx = &ctx;
             scope.spawn(move || {
                 let key = format!("sk-concurrent-{index:02}-tail{index:04}");
-                let output = ctx.run(&["key", "kimi", &key]);
+                let output = ctx.run(&["--key", "kimi", &key]);
                 assert!(
                     output.status.success(),
                     "并发新增 {key} 失败\nstdout:\n{}\nstderr:\n{}",
@@ -340,7 +417,7 @@ fn concurrent_key_adds_keep_every_dummy_key() {
         }
     });
 
-    let listed = ctx.ok(&["key", "kimi", "list"]);
+    let listed = ctx.ok(&["-k", "kimi", "list"]);
     assert!(
         listed.contains(&format!("共 {ADDERS} 把")),
         "并发新增后不得丢 key：\n{listed}"
@@ -356,8 +433,8 @@ fn concurrent_key_adds_keep_every_dummy_key() {
 #[test]
 fn rekey_and_key_adds_serialize_on_transaction_lock() {
     let ctx = Ctx::new("concurrent-rekey");
-    ctx.ok(&["init"]);
-    ctx.ok(&["key", "kimi", "sk-base-0000"]);
+    ctx.ok(&["--init"]);
+    ctx.ok(&["--key", "kimi", "sk-base-0000"]);
 
     const ADDERS: usize = 6;
     std::thread::scope(|scope| {
@@ -365,7 +442,7 @@ fn rekey_and_key_adds_serialize_on_transaction_lock() {
             let ctx = &ctx;
             scope.spawn(move || {
                 let key = format!("sk-rekey-{index:02}-tail{index:04}");
-                let output = ctx.run(&["key", "kimi", &key]);
+                let output = ctx.run(&["--key", "kimi", &key]);
                 assert!(
                     output.status.success(),
                     "rekey 并发新增 {key} 失败\nstdout:\n{}\nstderr:\n{}",
@@ -377,7 +454,7 @@ fn rekey_and_key_adds_serialize_on_transaction_lock() {
         for _ in 0..3 {
             let ctx = &ctx;
             scope.spawn(move || {
-                let output = ctx.run(&["vault", "rekey"]);
+                let output = ctx.run(&["--vault", "--rekey"]);
                 assert!(
                     output.status.success(),
                     "并发 rekey 失败\nstdout:\n{}\nstderr:\n{}",
@@ -388,7 +465,7 @@ fn rekey_and_key_adds_serialize_on_transaction_lock() {
         }
     });
 
-    let listed = ctx.ok(&["key", "kimi", "list"]);
+    let listed = ctx.ok(&["-k", "kimi", "list"]);
     assert!(
         listed.contains(&format!("共 {} 把", ADDERS + 1)),
         "rekey 与更新并发后不得丢 key：\n{listed}"
@@ -401,7 +478,7 @@ fn key_stdin_reads_multiple_keys_without_echoing_plaintext() {
     let secrets = ["sk-stdin-alpha-1234567890", "sk-stdin-beta-0987654321"];
 
     let output = ctx.run_with_stdin(
-        &["key", "kimi", "--stdin"],
+        &["--key", "kimi", "--stdin"],
         &format!("{}\n{}\n", secrets[0], secrets[1]),
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -420,7 +497,7 @@ fn key_stdin_reads_multiple_keys_without_echoing_plaintext() {
         assert!(!ciphertext.contains(secret), "密文文件不得出现明文 key");
     }
 
-    let listed = ctx.ok(&["key", "kimi", "list"]);
+    let listed = ctx.ok(&["--key", "kimi", "list"]);
     assert!(listed.contains("sk-std"), "列表应显示掩码：\n{listed}");
     for secret in secrets {
         assert!(!listed.contains(secret), "掩码不得泄露完整 key：\n{listed}");
@@ -428,7 +505,7 @@ fn key_stdin_reads_multiple_keys_without_echoing_plaintext() {
 
     // 旧式 --key/-k 走同一条 stdin 路径。
     let legacy_secret = "sk-legacy-gamma-1122334455";
-    let output = ctx.run_with_stdin(&["--key", "kimi", "--stdin"], legacy_secret);
+    let output = ctx.run_with_stdin(&["-k", "kimi", "--stdin"], legacy_secret);
     assert!(
         output.status.success(),
         "旧式 --key --stdin 应成功：\n{}",
@@ -442,13 +519,42 @@ fn key_stdin_reads_multiple_keys_without_echoing_plaintext() {
     assert!(!listed.contains(legacy_secret));
 
     // 空 stdin 必须失败，而不是写入空 key。
-    let output = ctx.run_with_stdin(&["key", "kimi", "--stdin"], "  \n");
+    let output = ctx.run_with_stdin(&["-k", "kimi", "--stdin"], "  \n");
     assert!(!output.status.success(), "空 stdin 应非零退出");
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("stdin 为空"),
         "空 stdin 应给出明确错误：\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn bare_commands_are_all_rejected() {
+    let ctx = Ctx::new("bare-commands");
+
+    for word in [
+        "init", "on", "off", "status", "list", "key", "vault", "models", "test", "route", "router",
+        "stats", "doctor", "version", "help",
+    ] {
+        let stderr = ctx.fail(&[word]);
+        assert_eq!(
+            stderr.lines().count(),
+            1,
+            "{word} 错误应只有一行：{stderr:?}"
+        );
+        assert!(
+            stderr.starts_with("✗ "),
+            "{word} 错误应以 ✗ 开头：{stderr:?}"
+        );
+        assert!(
+            stderr.contains("ccms --help/-h 看用法"),
+            "{word} 应提示旧式帮助：{stderr:?}"
+        );
+        assert!(
+            !stderr.contains("Usage:") && !stderr.contains("Commands:"),
+            "{word} 不得出现 clap 页面：{stderr:?}"
+        );
+    }
 }
 
 #[test]
@@ -467,17 +573,17 @@ fn unknown_commands_are_chinese_and_nonzero() {
 
     let stderr = ctx.fail(&["--route", "frob"]);
     assert!(
-        stderr.contains("未知子命令: frob"),
+        stderr.contains("未知操作: frob"),
         "旧式嵌套错误不对：{stderr:?}"
     );
     assert!(stderr.contains("--route/-r"));
 
+    // 裸首词连嵌套参数也一律按未知命令处理。
     let stderr = ctx.fail(&["route", "frob"]);
     assert!(
-        stderr.contains("未知子命令: frob"),
-        "新式嵌套错误不对：{stderr:?}"
+        stderr.contains("未知命令: route"),
+        "裸子命令必须先于嵌套解析被拒绝：{stderr:?}"
     );
-    assert!(stderr.contains("--route/-r"));
 }
 
 #[test]
@@ -506,10 +612,10 @@ fn missing_arguments_use_legacy_usage() {
 fn corrupt_stats_and_vault_are_reported_as_errors() {
     let ctx = Ctx::new("corrupt");
 
-    ctx.ok(&["init"]);
+    ctx.ok(&["--init"]);
     let stats = ctx.home.join("stats.json");
     std::fs::write(&stats, br#"{"version":2,"daily":{"#).unwrap();
-    let stderr = ctx.fail(&["stats", "--json"]);
+    let stderr = ctx.fail(&["--stats", "--json"]);
     assert!(
         stderr.contains("stats") || stderr.contains("统计"),
         "stats 应显示解析错误：{stderr:?}"
@@ -521,19 +627,19 @@ fn corrupt_stats_and_vault_are_reported_as_errors() {
     );
 
     std::fs::write(ctx.home.join("keys.enc"), b"not a vault").unwrap();
-    let stderr = ctx.fail(&["list"]);
+    let stderr = ctx.fail(&["--list"]);
     assert!(
         stderr.contains("密钥库"),
         "损坏密钥库不得伪装为空池：{stderr:?}"
     );
-    let stderr = ctx.fail(&["key", "kimi", "list"]);
+    let stderr = ctx.fail(&["--key", "kimi", "list"]);
     assert!(stderr.contains("密钥库"), "key list 也必须报错：{stderr:?}");
 }
 
 #[test]
 fn plaintext_migration_failure_aborts_before_listening() {
     let ctx = Ctx::new("migrate-fail");
-    ctx.ok(&["init"]);
+    ctx.ok(&["--init"]);
 
     let routes_path = ctx.home.join("routes.json");
     let mut routes: serde_json::Value =
@@ -550,7 +656,7 @@ fn plaintext_migration_failure_aborts_before_listening() {
     std::fs::create_dir(ctx.home.join("keys.enc")).unwrap();
 
     let mut child = ctx
-        .cmd(&["router", "run"])
+        .cmd(&["--router", "--run"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -618,5 +724,5 @@ fn explicit_home_and_settings_work_without_home_env() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("0.2.0"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("0.2.1"));
 }

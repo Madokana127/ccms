@@ -7,7 +7,7 @@ use std::path::Path;
 
 use crate::fsutil;
 
-/// 由 `ccms on` 独占管理的 env 键，`ccms off` 会精确移除这些。
+/// 由 `--on` 独占管理的 env 键，`--off` 会精确移除这些。
 const MANAGED_ENV: [&str; 12] = [
     "ANTHROPIC_BASE_URL",
     "ANTHROPIC_AUTH_TOKEN",
@@ -23,7 +23,7 @@ const MANAGED_ENV: [&str; 12] = [
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
 ];
 
-/// `ccms on` 前的受管状态。env 里只保存原本存在的键，缺失即删除；
+/// `--on` 前的受管状态。env 里只保存原本存在的键，缺失即删除；
 /// model 用 has_model 区分“原本不存在”和“原值为 null”。
 #[derive(Serialize, Deserialize, Default)]
 struct PreviousState {

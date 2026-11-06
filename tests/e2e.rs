@@ -168,7 +168,7 @@ async fn end_to_end_router() {
 
     // 两把 key：第一把会被上游拒绝，验证换 key + 重试。
     let status = Command::new(BIN)
-        .args(["key", "kimi", "sk-bad"])
+        .args(["--key", "kimi", "sk-bad"])
         .env("CCMS_HOME", &home)
         .stdout(Stdio::null())
         .status()
@@ -176,7 +176,7 @@ async fn end_to_end_router() {
     assert!(status.success());
 
     let status = Command::new(BIN)
-        .args(["key", "kimi", "sk-good"])
+        .args(["--key", "kimi", "sk-good"])
         .env("CCMS_HOME", &home)
         .stdout(Stdio::null())
         .status()
@@ -184,7 +184,7 @@ async fn end_to_end_router() {
     assert!(status.success());
 
     let child = Command::new(BIN)
-        .args(["router", "run"])
+        .args(["--router", "--run"])
         .env("CCMS_HOME", &home)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -214,13 +214,13 @@ async fn end_to_end_router() {
     );
 
     let second = Command::new(BIN)
-        .args(["router", "run"])
+        .args(["--router", "--run"])
         .env("CCMS_HOME", &home)
         .output()
         .expect("second router run");
     assert!(
         !second.status.success(),
-        "端口被占用时 router run 必须以非零退出"
+        "端口被占用时 --router --run 必须以非零退出"
     );
     assert!(
         String::from_utf8_lossy(&second.stderr).contains("已被占用"),
@@ -466,7 +466,7 @@ async fn test_router_waits_past_local_health_timeout() {
     .expect("routes");
 
     let status = Command::new(BIN)
-        .args(["key", "kimi", "sk-test"])
+        .args(["--key", "kimi", "sk-test"])
         .env("CCMS_HOME", &home)
         .stdout(Stdio::null())
         .status()
@@ -474,7 +474,7 @@ async fn test_router_waits_past_local_health_timeout() {
     assert!(status.success());
 
     let child = Command::new(BIN)
-        .args(["router", "run"])
+        .args(["--router", "--run"])
         .env("CCMS_HOME", &home)
         .stdout(Stdio::null())
         .stderr(Stdio::null())

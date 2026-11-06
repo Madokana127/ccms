@@ -15,7 +15,7 @@
     "default_model": "kimi-k3.1-pro",
     "models": ["kimi-k3.1-pro", "kimi-k3.1-pro-highspeed", "kimi-k3"],
     "auth": "bearer",
-    "note": "可用 ID 以 ccms models kimi 为准"
+    "note": "可用 ID 以 ccms --models/-m kimi 为准"
   },
   "qwen": {
     "label": "千问 MaaS",

@@ -10,8 +10,8 @@ const PATHS: &str = include_str!("../src/paths.rs");
 #[test]
 fn install_ps1_fails_when_init_fails() {
     let init = INSTALL_PS1
-        .find("& $exe init")
-        .expect("install.ps1 必须调用 $exe init");
+        .find("& $exe --init")
+        .expect("install.ps1 必须调用 $exe --init");
     let after = &INSTALL_PS1[init..];
     let check = after
         .find("$LASTEXITCODE")
@@ -28,6 +28,30 @@ fn install_ps1_fails_when_init_fails() {
         .join("\n");
     assert!(block.contains("-ne 0"), "必须判断非零退出：{block:?}");
     assert!(block.contains("Fail"), "非零必须走现有 Fail：{block:?}");
+}
+
+#[test]
+fn installers_only_advertise_legacy_flags() {
+    const INSTALL_SH: &str = include_str!("../install.sh");
+    for text in [INSTALL_PS1, INSTALL_SH] {
+        assert!(!text.contains("ccms key "), "安装脚本不得展示裸 key 子命令");
+        assert!(
+            !text.contains("ccms on ") && !text.contains("ccms on\n"),
+            "安装脚本不得展示裸 on 子命令"
+        );
+        assert!(
+            !text.contains("ccms doctor"),
+            "安装脚本不得展示裸 doctor 子命令"
+        );
+    }
+    assert!(
+        INSTALL_SH.contains("\"$BIN\" --init"),
+        "install.sh 初始化必须用 --init"
+    );
+    assert!(
+        !INSTALL_SH.contains("\"$BIN\" init"),
+        "install.sh 不得调用裸 init"
+    );
 }
 
 #[test]

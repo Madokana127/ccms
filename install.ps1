@@ -71,10 +71,10 @@ if (-not $NoPath) {
 $env:Path = "$Prefix;$env:Path"
 
 Write-Host '== 初始化配置 =='
-& $exe init
-if ($LASTEXITCODE -ne 0) { Fail 'ccms init 失败' }
+& $exe --init
+if ($LASTEXITCODE -ne 0) { Fail 'ccms --init 失败' }
 
 Write-Host ''
 Ok '安装完成'
-Write-Host '下一步: ccms key <provider> sk-...  →  ccms on  →  新开一个 claude'
-Write-Host '验证:   ccms doctor'
+Write-Host '下一步: ccms --key <provider> sk-...  →  ccms --on  →  新开一个 claude'
+Write-Host '验证:   ccms --doctor'

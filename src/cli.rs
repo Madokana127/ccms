@@ -191,11 +191,6 @@ const VAULT_SUBS: &[(&str, &str)] = &[
     ("--rekey", "rekey"),
 ];
 
-const MODERN_COMMANDS: &[&str] = &[
-    "init", "on", "off", "status", "list", "key", "vault", "models", "test", "route", "router",
-    "stats", "doctor", "version",
-];
-
 pub enum Prepared {
     Help,
     Version,
@@ -225,12 +220,11 @@ pub fn prepare(args: Vec<OsString>) -> Result<Prepared, String> {
         _ => {}
     }
 
-    let canonical = if let Some(mapped) = alias(TOP_ALIASES, &first) {
-        mapped.to_string()
-    } else if MODERN_COMMANDS.contains(&first.as_ref()) {
-        first.to_string()
-    } else {
-        return Err(format!("✗ 未知命令: {first}（ccms --help/-h 看用法）"));
+    let canonical = match alias(TOP_ALIASES, &first) {
+        Some(mapped) => mapped.to_string(),
+        None => {
+            return Err(format!("✗ 未知命令: {first}（ccms --help/-h 看用法）"));
+        }
     };
 
     let mut out = vec![program, OsString::from(&canonical)];
@@ -241,21 +235,21 @@ pub fn prepare(args: Vec<OsString>) -> Result<Prepared, String> {
             nested,
             ROUTE_SUBS,
             "list",
-            "未知子命令: {}（ccms --route/-r 看用法）",
+            "未知操作: {}（ccms --route/-r 看用法）",
         )?,
         "router" => push_nested(
             &mut out,
             nested,
             ROUTER_SUBS,
             "status",
-            "未知子命令: {}（ccms --router 看用法）",
+            "未知操作: {}（ccms --router 看用法）",
         )?,
         "vault" => push_nested(
             &mut out,
             nested,
             VAULT_SUBS,
             "status",
-            "未知子命令: {}（ccms --help/-h 看用法）",
+            "未知操作: {}（ccms --help/-h 看用法）",
         )?,
         _ => out.extend(nested.iter().cloned()),
     }
@@ -570,25 +564,53 @@ mod tests {
     }
 
     #[test]
-    fn modern_commands_are_untouched() {
+    fn bare_commands_are_rejected() {
+        for word in MODERN_WORDS {
+            let args = ["ccms", word].into_iter().map(OsString::from).collect();
+            let err = prepare(args).err().expect("裸子命令必须被拒绝");
+            assert!(
+                err.contains(&format!("未知命令: {word}")),
+                "{word} 错误不对：{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn internal_router_entry_is_reachable_only_via_legacy_flag() {
         assert_eq!(
-            normalized(&["route", "set", "opus", "kimi", "kimi-k3"]),
-            expect(&["ccms", "route", "set", "opus", "kimi", "kimi-k3"])
+            normalized(&["--router", "--run"]),
+            expect(&["ccms", "router", "run"])
         );
         assert_eq!(
-            normalized(&["stats", "--json"]),
-            expect(&["ccms", "stats", "--json"])
+            normalized(&["--router", "--ensure"]),
+            expect(&["ccms", "router", "ensure"])
         );
+        assert_eq!(
+            normalized(&["--router", "run"]),
+            expect(&["ccms", "router", "run"])
+        );
+        let args = ["ccms", "router", "run"]
+            .into_iter()
+            .map(OsString::from)
+            .collect();
+        assert!(prepare(args).is_err(), "裸 router run 不得公开");
     }
 
     #[test]
     fn unknown_nested_is_rejected() {
-        assert!(prepare(
-            ["ccms", "--route", "frob"]
-                .into_iter()
-                .map(OsString::from)
-                .collect()
-        )
-        .is_err());
+        let args = ["ccms", "--route", "frob"]
+            .into_iter()
+            .map(OsString::from)
+            .collect();
+        let err = match prepare(args) {
+            Err(err) => err,
+            Ok(_) => panic!("未知嵌套操作必须被拒绝"),
+        };
+        assert!(err.contains("未知操作: frob"), "{err}");
     }
+
+    const MODERN_WORDS: &[&str] = &[
+        "init", "on", "off", "status", "list", "key", "vault", "models", "test", "route", "router",
+        "stats", "doctor", "version", "help",
+    ];
 }

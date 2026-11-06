@@ -66,7 +66,7 @@ pub fn load(paths: &Paths) -> Result<String> {
     Ok(token.to_string())
 }
 
-/// 读取，不存在则原子创建。`ccms on` 与 `router run` 共用这一条路径。
+/// 读取，不存在则原子创建。`--on` 与 `--router --run` 共用这一条路径。
 /// 整个“检查存在→生成→写入→读取”过程持有跨进程排他锁，避免并发
 /// ensure 读到尚未写完的临时文件。
 pub fn ensure(paths: &Paths) -> Result<String> {

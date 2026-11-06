@@ -37,7 +37,7 @@ pub async fn run(paths: &Paths, cmd: Option<RouterCmd>) -> Result<()> {
             Ok(())
         }
         RouterCmd::Status => {
-            println!("{}", style.section("ccms router"));
+            println!("{}", style.section("Router"));
             match proc::health(&listen).await? {
                 Some(health) => {
                     println!("  {}", style.ok(&format!("运行中 http://{listen}")));

@@ -5,7 +5,7 @@
 if type -q ccms
     if test -f ~/.claude/settings.json
         if grep -qs 'ANTHROPIC_BASE_URL.*127\.0\.0\.1' ~/.claude/settings.json
-            ccms router ensure >/dev/null 2>&1 &
+            ccms --router --ensure >/dev/null 2>&1 &
         end
     end
 end

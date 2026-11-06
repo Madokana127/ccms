@@ -86,7 +86,7 @@ pub async fn wait_alive(listen: &str, timeout: Duration) -> bool {
     false
 }
 
-/// 以守护进程方式拉起 `ccms router run`，stdout/stderr 进 router.log。
+/// 以守护进程方式拉起 `ccms --router --run`，stdout/stderr 进 router.log。
 pub fn spawn(paths: &Paths) -> Result<()> {
     rotate_log(&paths.log, 5 * 1024 * 1024);
     if let Some(dir) = paths.log.parent() {
@@ -100,8 +100,8 @@ pub fn spawn(paths: &Paths) -> Result<()> {
         .with_context(|| format!("打开 {}", paths.log.display()))?;
 
     let mut cmd = Command::new(exe);
-    cmd.arg("router")
-        .arg("run")
+    cmd.arg("--router")
+        .arg("--run")
         .stdin(Stdio::null())
         .stdout(Stdio::from(log.try_clone()?))
         .stderr(Stdio::from(log));
@@ -124,8 +124,68 @@ pub fn spawn(paths: &Paths) -> Result<()> {
         cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
     }
 
+    // Windows 的 CreateProcess 会复制执行父进程的 stdio 管道句柄。若父进程的
+    // stdout 被 `Command::output` 或管道捕获，后台 router 会一直持有写端，导致
+    // `ccms --on | ...` 永远等不到 EOF。spawn 期间临时清掉父 stdio 的继承位；
+    // router 自己的 stdout/stderr 已显式指向 router.log，不受影响。
+    #[cfg(windows)]
+    let _stdio_inherit_guard = non_inheritable_stdio::Guard::new();
+
     cmd.spawn().context("启动 router 失败")?;
     Ok(())
+}
+
+#[cfg(windows)]
+mod non_inheritable_stdio {
+    use std::ffi::c_void;
+    use std::io::{stderr, stdin, stdout};
+    use std::os::windows::io::AsRawHandle;
+
+    const HANDLE_FLAG_INHERIT: u32 = 0x0000_0001;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetHandleInformation(handle: *mut c_void, flags: *mut u32) -> i32;
+        fn SetHandleInformation(handle: *mut c_void, mask: u32, flags: u32) -> i32;
+    }
+
+    pub struct Guard {
+        saved: Vec<(*mut c_void, u32)>,
+    }
+
+    impl Guard {
+        pub fn new() -> Self {
+            let handles = [
+                stdin().as_raw_handle(),
+                stdout().as_raw_handle(),
+                stderr().as_raw_handle(),
+            ];
+            let mut saved = Vec::new();
+            for handle in handles {
+                let mut flags = 0;
+                // SAFETY: 标准句柄在当前进程内有效；只读取继承位。
+                if unsafe { GetHandleInformation(handle, &mut flags) } != 0
+                    && flags & HANDLE_FLAG_INHERIT != 0
+                {
+                    // SAFETY: 清除 HANDLE_FLAG_INHERIT，不改变其他标志。
+                    unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) };
+                    saved.push((handle, flags));
+                }
+            }
+            Self { saved }
+        }
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            for (handle, flags) in &self.saved {
+                // SAFETY: 恢复 spawn 前读取到的继承位；句柄仍在当前进程内有效。
+                unsafe {
+                    SetHandleInformation(*handle, HANDLE_FLAG_INHERIT, flags & HANDLE_FLAG_INHERIT);
+                }
+            }
+        }
+    }
 }
 
 /// 返回是否真的停掉了一个正在运行的 router。
