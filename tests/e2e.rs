@@ -27,7 +27,7 @@ fn free_port() -> u16 {
     listener.local_addr().expect("addr").port()
 }
 
-async fn mock_upstream(port: u16) {
+async fn mock_upstream(port: u16, say_ok_delay: Duration) {
     let app = Router::new()
         .route("/v1/messages", post(mock_messages))
         .route(
@@ -36,7 +36,7 @@ async fn mock_upstream(port: u16) {
                 (axum::http::StatusCode::NOT_FOUND, "not implemented").into_response()
             }),
         )
-        .with_state(());
+        .with_state(say_ok_delay);
 
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
         .await
@@ -46,7 +46,7 @@ async fn mock_upstream(port: u16) {
 
 async fn mock_messages(
     headers: HeaderMap,
-    State(_): State<()>,
+    State(say_ok_delay): State<Duration>,
     Json(body): Json<Value>,
 ) -> Response {
     let auth = headers
@@ -62,6 +62,15 @@ async fn mock_messages(
             ),
         )
             .into_response();
+    }
+
+    let is_say_ok = body["messages"].as_array().is_some_and(|messages| {
+        messages
+            .iter()
+            .any(|message| message["content"].as_str() == Some("say ok"))
+    });
+    if is_say_ok && !say_ok_delay.is_zero() {
+        tokio::time::sleep(say_ok_delay).await;
     }
 
     if body["stream"] == json!(true) {
@@ -120,7 +129,7 @@ async fn end_to_end_router() {
     let upstream_port = free_port();
     let router_port = free_port();
 
-    tokio::spawn(mock_upstream(upstream_port));
+    tokio::spawn(mock_upstream(upstream_port, Duration::ZERO));
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     std::fs::write(
@@ -181,9 +190,60 @@ async fn end_to_end_router() {
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn router");
+    let child_pid = child.id();
     let _guard = Guard(child);
 
     wait_health(router_port).await;
+
+    let health: Value = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .expect("health client")
+        .get(format!("http://127.0.0.1:{router_port}/ccms/health"))
+        .send()
+        .await
+        .expect("health request")
+        .json()
+        .await
+        .expect("health json");
+    assert_eq!(
+        health["pid"],
+        json!(child_pid),
+        "health 必须报告当前 router pid"
+    );
+
+    let second = Command::new(BIN)
+        .args(["router", "run"])
+        .env("CCMS_HOME", &home)
+        .output()
+        .expect("second router run");
+    assert!(
+        !second.status.success(),
+        "端口被占用时 router run 必须以非零退出"
+    );
+    assert!(
+        String::from_utf8_lossy(&second.stderr).contains("已被占用"),
+        "应明确报告 AddrInUse：{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+
+    let token_path = home.join("router.token");
+    let token = std::fs::read_to_string(&token_path)
+        .expect("router.token 应存在")
+        .trim()
+        .to_string();
+    assert!(token.len() >= 43, "token 至少 32 随机字节的 base64url");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&token_path)
+            .expect("token metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "router.token 必须是 600");
+    }
 
     let base = format!("http://127.0.0.1:{router_port}");
     let client = reqwest::Client::builder()
@@ -192,10 +252,46 @@ async fn end_to_end_router() {
         .build()
         .expect("client");
 
+    // 0) 鉴权边界：无 token / 错 token 必须 401，且不能把固定占位值当凭据。
+    let unauthorized = client
+        .get(format!("{base}/v1/models"))
+        .send()
+        .await
+        .expect("models no token");
+    assert_eq!(unauthorized.status(), 401, "无 token 必须拒绝 /v1/models");
+    let unauthorized = client
+        .post(format!("{base}/v1/messages"))
+        .header("x-api-key", "ccms-router-local")
+        .json(&json!({"model": "ccms-sonnet", "messages": []}))
+        .send()
+        .await
+        .expect("proxy fixed token");
+    assert_eq!(
+        unauthorized.status(),
+        401,
+        "固定占位 token 必须失效（token={token:?}）"
+    );
+    let unauthorized = client
+        .get(format!("{base}/v1/models"))
+        .header("x-api-key", "wrong-token")
+        .send()
+        .await
+        .expect("models wrong token");
+    assert_eq!(unauthorized.status(), 401, "错误 token 必须拒绝");
+
+    // Bearer 形式也必须被接受。
+    let authorized = client
+        .get(format!("{base}/v1/models"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .expect("models bearer");
+    assert_eq!(authorized.status(), 200, "Authorization: Bearer 应通过鉴权");
+
     // 1) 档位路由 + 密钥池重试（第一把 key 401，第二把成功）
     let response = client
         .post(format!("{base}/v1/messages"))
-        .header("x-api-key", "ccms-router-local")
+        .header("x-api-key", &token)
         .json(&json!({
             "model": "ccms-opus",
             "max_tokens": 16,
@@ -212,7 +308,7 @@ async fn end_to_end_router() {
     // 2) 模型名里带 opus 也可路由，且模型被改写成路由里的真实 ID
     let echoed: Value = client
         .post(format!("{base}/v1/messages"))
-        .header("x-api-key", "ccms-router-local")
+        .header("x-api-key", &token)
         .json(&json!({"model": "claude-opus-4-1", "messages": []}))
         .send()
         .await
@@ -232,7 +328,7 @@ async fn end_to_end_router() {
     std::fs::write(&routes_path, hot.to_string()).expect("rewrite routes");
     let echoed: Value = client
         .post(format!("{base}/v1/messages"))
-        .header("x-api-key", "ccms-router-local")
+        .header("x-api-key", &token)
         .json(&json!({"model": "ccms-sonnet", "messages": []}))
         .send()
         .await
@@ -245,7 +341,7 @@ async fn end_to_end_router() {
     // 4) SSE 透传
     let streamed = client
         .post(format!("{base}/v1/messages"))
-        .header("x-api-key", "ccms-router-local")
+        .header("x-api-key", &token)
         .json(&json!({"model": "ccms-sonnet", "stream": true, "messages": []}))
         .send()
         .await
@@ -258,6 +354,7 @@ async fn end_to_end_router() {
     // 5) count_tokens 兜底
     let counted: Value = client
         .post(format!("{base}/v1/messages/count_tokens"))
+        .header("x-api-key", &token)
         .json(&json!({"model": "ccms-haiku", "messages": [{"role":"user","content":"hello"}]}))
         .send()
         .await
@@ -270,6 +367,7 @@ async fn end_to_end_router() {
     // 6) /v1/models 只暴露哨兵
     let models: Value = client
         .get(format!("{base}/v1/models"))
+        .header("x-api-key", &token)
         .send()
         .await
         .expect("models")
@@ -310,4 +408,102 @@ async fn end_to_end_router() {
     assert!(day["total"]["retries"].as_u64().unwrap_or(0) >= 1);
     assert!(day["total"]["output_tokens"].as_u64().unwrap_or(0) >= 9);
     assert!(day["tiers"]["opus"]["requests"].as_u64().unwrap_or(0) >= 1);
+
+    // 8) 日志只记请求，不得泄漏 token 明文。
+    let log = std::fs::read_to_string(home.join("router.log")).expect("router.log");
+    assert!(
+        !log.contains(&token),
+        "router.log 不得出现 token 明文:\n{log}"
+    );
+    assert!(log.contains("401 POST /v1/messages 未授权"), "应记录拒绝");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_router_waits_past_local_health_timeout() {
+    let home = std::env::temp_dir().join(format!("ccms-e2e-test-router-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).expect("mkdir");
+
+    let upstream_port = free_port();
+    let router_port = free_port();
+
+    // 只延迟 `say ok`（--test router 的固定探测请求），其余请求立即返回。
+    tokio::spawn(mock_upstream(upstream_port, Duration::from_millis(2000)));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    std::fs::write(
+        home.join("providers.json"),
+        json!({
+            "kimi": {
+                "label": "Mock",
+                "base_url": format!("http://127.0.0.1:{upstream_port}"),
+                "key_env": "KIMI_API_KEY",
+                "default_model": "mock-model",
+                "models": ["mock-model"]
+            }
+        })
+        .to_string(),
+    )
+    .expect("providers");
+
+    std::fs::write(
+        home.join("routes.json"),
+        json!({
+            "listen": format!("127.0.0.1:{router_port}"),
+            "default": "sonnet",
+            "effort": "high",
+            "retry": { "attempts": 3, "backoff_ms": 10, "response_timeout_ms": 5000, "connect_timeout_ms": 2000, "retry_on": [401, 429, 500, 502, 503, 504] },
+            "routes": {
+                "opus": { "provider": "kimi", "model": "mock-model" },
+                "sonnet": { "provider": "kimi", "model": "mock-model" },
+                "haiku": { "provider": "kimi", "model": "mock-model" },
+                "fable": { "provider": "kimi", "model": "mock-model" },
+                "subagent": { "provider": "kimi", "model": "mock-model" }
+            }
+        })
+        .to_string(),
+    )
+    .expect("routes");
+
+    let status = Command::new(BIN)
+        .args(["key", "kimi", "sk-test"])
+        .env("CCMS_HOME", &home)
+        .stdout(Stdio::null())
+        .status()
+        .expect("run key");
+    assert!(status.success());
+
+    let child = Command::new(BIN)
+        .args(["router", "run"])
+        .env("CCMS_HOME", &home)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn router");
+    let _guard = Guard(child);
+    wait_health(router_port).await;
+
+    let started = std::time::Instant::now();
+    let output = Command::new(BIN)
+        .args(["--test", "router"])
+        .env("CCMS_HOME", &home)
+        .env("CLAUDE_SETTINGS", home.join("settings.json"))
+        .output()
+        .expect("run test router");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "--test router 应等待 2s 慢上游成功（旧实现 1500ms 必超时）：\nstdout={stdout}\nstderr={stderr}"
+    );
+    assert!(stdout.contains("HTTP 200"), "应打印上游状态：{stdout}");
+    assert!(
+        stdout.contains("路由链路可用"),
+        "应报告路由链路可用：{stdout}"
+    );
+    assert!(
+        started.elapsed() >= Duration::from_millis(1800),
+        "mock 的 2s 延迟应被实际触发"
+    );
 }

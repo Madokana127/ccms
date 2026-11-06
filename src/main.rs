@@ -10,18 +10,45 @@ mod router;
 mod settings;
 mod stats;
 mod term;
-
-use clap::Parser;
+mod token;
 
 use cli::{Cli, Command};
 use paths::Paths;
 
 #[tokio::main]
 async fn main() {
-    // 旧版 `ccms --on` 之类的写法先翻译成子命令，再交给 clap 解析。
-    let argv = cli::translate_legacy(std::env::args_os().collect());
-    let cli = Cli::parse_from(argv);
-    let paths = Paths::load();
+    let paths = match Paths::load() {
+        Ok(paths) => paths,
+        Err(err) => {
+            eprintln!("✗ {err:#}");
+            std::process::exit(1);
+        }
+    };
+
+    // 旧 flag（含嵌套短名）先规范化为子命令 token，再走同一棵 clap 树。
+    let argv = match cli::prepare(std::env::args_os().collect()) {
+        Ok(cli::Prepared::Help) => {
+            cli::print_help(&paths);
+            return;
+        }
+        Ok(cli::Prepared::Version) => {
+            cli::print_version();
+            return;
+        }
+        Ok(cli::Prepared::Run(argv)) => argv,
+        Err(message) => {
+            eprintln!("{message}");
+            std::process::exit(1);
+        }
+    };
+
+    let cli: Cli = match cli::parse_args(&argv) {
+        Ok(cli) => cli,
+        Err(message) => {
+            eprintln!("{message}");
+            std::process::exit(1);
+        }
+    };
 
     if let Err(err) = dispatch(cli.command, paths).await {
         eprintln!("✗ {err:#}");
@@ -41,7 +68,14 @@ async fn dispatch(command: Option<Command>, paths: Paths) -> anyhow::Result<()> 
             provider,
             action,
             value,
-        }) => commands::keys::run(&paths, &provider, action.as_deref(), value.as_deref()),
+            stdin,
+        }) => commands::keys::run(
+            &paths,
+            &provider,
+            action.as_deref(),
+            value.as_deref(),
+            stdin,
+        ),
         Some(Command::Vault { cmd }) => {
             let cmd = cmd.unwrap_or(cli::VaultCmd::Status);
             commands::vault::run(&paths, cmd).await

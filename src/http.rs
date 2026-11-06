@@ -31,8 +31,16 @@ pub fn upstream(timeout: Option<Duration>, connect: Option<Duration>) -> Result<
 
 /// 本机 router 的健康检查 / 探活，永远绕过代理。
 pub fn local() -> Result<reqwest::Client> {
+    local_with_timeout(Duration::from_millis(1500))
+}
+
+/// 本机 router 的可配置超时客户端，仍永远绕过代理。
+///
+/// 健康检查保持 1500ms；`--test router` 要等真实上游，使用 60s，
+/// 与手工 `curl -m60` 的语义一致。不能复用 `upstream`，否则会继承 `CCMS_PROXY`。
+pub fn local_with_timeout(timeout: Duration) -> Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
         .no_proxy()
-        .timeout(Duration::from_millis(1500))
+        .timeout(timeout)
         .build()?)
 }

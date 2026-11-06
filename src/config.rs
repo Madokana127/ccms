@@ -197,7 +197,7 @@ pub fn require_provider<'a>(providers: &'a Providers, name: &str) -> Result<&'a 
 
 /// 创建缺失的配置文件；返回 (路径, 是否新建)。已存在的一律不覆盖。
 pub fn ensure_defaults(paths: &Paths) -> Result<Vec<(&'static str, bool)>> {
-    paths.ensure().ok();
+    paths.ensure().context("创建 CCMS_HOME 失败")?;
     let mut report = Vec::new();
 
     if paths.routes.exists() {

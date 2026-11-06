@@ -112,7 +112,7 @@ pub async fn status(paths: &Paths, json_output: bool) -> Result<()> {
     } else {
         println!(
             "  {}",
-            style.warn("明文 keys.env（ccms vault seal 可迁移到加密存储）")
+            style.warn("明文 keys.env（ccms --vault --seal 可迁移到加密存储）")
         );
     }
     Ok(())
@@ -121,7 +121,7 @@ pub async fn status(paths: &Paths, json_output: bool) -> Result<()> {
 pub fn list(paths: &Paths) -> Result<()> {
     config::ensure_defaults(paths)?;
     let providers = config::load_providers(&paths.providers)?;
-    let env = Vault::new(paths).load_or_empty();
+    let env = Vault::new(paths).load()?;
 
     println!(
         "{:<12}{:<20}{:<46}{:<7}DEFAULT MODEL",
@@ -150,7 +150,7 @@ pub async fn models(paths: &Paths, provider_name: &str) -> Result<()> {
     config::ensure_defaults(paths)?;
     let providers = config::load_providers(&paths.providers)?;
     let provider = config::require_provider(&providers, provider_name)?;
-    let env = Vault::new(paths).load_or_empty();
+    let env = Vault::new(paths).load()?;
     let keys = keystore::keys_for(&env, provider);
     let Some(key) = keys.first() else {
         bail!("{provider_name} 没有可用 key");
@@ -188,7 +188,7 @@ pub async fn models(paths: &Paths, provider_name: &str) -> Result<()> {
 pub async fn test(paths: &Paths, target: Option<&str>) -> Result<()> {
     config::ensure_defaults(paths)?;
     let style = Style::detect();
-    let target = target.ok_or_else(|| anyhow!("用法: ccms test <provider|router|all>"))?;
+    let target = target.ok_or_else(|| anyhow!("用法: ccms --test/-t <provider|router|all>"))?;
 
     match target {
         "router" => test_router(paths, &style).await,
@@ -212,7 +212,7 @@ pub async fn test(paths: &Paths, target: Option<&str>) -> Result<()> {
 async fn test_provider(paths: &Paths, name: &str, style: &Style) -> Result<()> {
     let providers = config::load_providers(&paths.providers)?;
     let provider = config::require_provider(&providers, name)?;
-    let env = Vault::new(paths).load_or_empty();
+    let env = Vault::new(paths).load()?;
     let keys = keystore::keys_for(&env, provider);
     let Some(key) = keys.first() else {
         bail!("还没填 {name} 的 key");
@@ -255,9 +255,10 @@ async fn test_provider(paths: &Paths, name: &str, style: &Style) -> Result<()> {
 async fn test_router(paths: &Paths, style: &Style) -> Result<()> {
     let routes = config::load_routes(&paths.routes)?;
     if !proc::alive(&routes.listen).await {
-        bail!("router 未运行（ccms router start）");
+        bail!("router 未运行（ccms --router --start）");
     }
     let url = format!("http://{}/v1/messages", routes.listen);
+    let token = crate::token::ensure(paths)?;
     let body = json!({
         "model": format!("ccms-{}", routes.default),
         "max_tokens": 16,
@@ -265,11 +266,11 @@ async fn test_router(paths: &Paths, style: &Style) -> Result<()> {
     });
 
     println!("{}", style.section(&format!("POST {url}")));
-    let response = proc::health_client()
+    let response = crate::http::local_with_timeout(Duration::from_secs(60))?
         .post(&url)
         .header("anthropic-version", "2023-06-01")
         .header("content-type", "application/json")
-        .header("x-api-key", "ccms-router-local")
+        .header("x-api-key", token)
         .body(serde_json::to_vec(&body)?)
         .send()
         .await?;
@@ -281,7 +282,7 @@ async fn test_router(paths: &Paths, style: &Style) -> Result<()> {
         println!("{}", style.ok("路由链路可用"));
         Ok(())
     } else {
-        bail!("路由链路失败，看 ccms router logs");
+        bail!("路由链路失败，看 ccms --router --logs");
     }
 }
 
@@ -344,19 +345,26 @@ pub async fn doctor(paths: &Paths) -> Result<()> {
             println!("  {}", style.fail(err));
         }
     } else {
-        println!("  {}", style.warn("明文 keys.env（ccms vault seal 加密）"));
+        println!(
+            "  {}",
+            style.warn("明文 keys.env（ccms --vault --seal 加密）")
+        );
     }
 
     println!("{}", style.section("密钥"));
     let providers = config::load_providers(&paths.providers)?;
-    let env = vault.load_or_empty();
-    for (name, provider) in &providers {
-        let count = keystore::keys_for(&env, provider).len();
-        if count > 0 {
-            println!("  {}", style.ok(&format!("{name}（{count} 把）")));
-        } else {
-            println!("  {}", style.warn(&format!("{name} 未填")));
+    match vault.load() {
+        Ok(env) => {
+            for (name, provider) in &providers {
+                let count = keystore::keys_for(&env, provider).len();
+                if count > 0 {
+                    println!("  {}", style.ok(&format!("{name}（{count} 把）")));
+                } else {
+                    println!("  {}", style.warn(&format!("{name} 未填")));
+                }
+            }
         }
+        Err(err) => println!("  {}", style.fail(&format!("读取密钥失败: {err:#}"))),
     }
 
     println!("{}", style.section("Router"));
@@ -368,7 +376,7 @@ pub async fn doctor(paths: &Paths) -> Result<()> {
         );
         super::print_routes(&routes, &style);
     } else {
-        println!("  {}", style.warn("未运行（ccms router start）"));
+        println!("  {}", style.warn("未运行（ccms --router --start）"));
     }
 
     Ok(())

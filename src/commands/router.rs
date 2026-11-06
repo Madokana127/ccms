@@ -38,7 +38,7 @@ pub async fn run(paths: &Paths, cmd: Option<RouterCmd>) -> Result<()> {
         }
         RouterCmd::Status => {
             println!("{}", style.section("ccms router"));
-            match proc::health(&listen).await {
+            match proc::health(&listen).await? {
                 Some(health) => {
                     println!("  {}", style.ok(&format!("运行中 http://{listen}")));
                     println!("  uptime   {} s", health["uptime_s"]);
@@ -63,12 +63,12 @@ pub async fn run(paths: &Paths, cmd: Option<RouterCmd>) -> Result<()> {
                         println!("  key      {}", summary.join("  "));
                     }
                 }
-                None => println!("  {}", style.warn("未运行（ccms router start）")),
+                None => println!("  {}", style.warn("未运行（ccms --router --start）")),
             }
             Ok(())
         }
         RouterCmd::Logs { n } => {
-            let text = proc::tail(&paths.log, n.unwrap_or(40));
+            let text = proc::tail(&paths.log, n.unwrap_or(40))?;
             if text.is_empty() {
                 println!("(暂无日志)");
             } else {
@@ -89,6 +89,9 @@ async fn start(paths: &Paths, style: &Style, listen: &str) -> Result<()> {
         println!("{}", style.ok(&format!("router 已启动 http://{listen}")));
         Ok(())
     } else {
-        bail!("router 启动失败，日志: {}", paths.log.display())
+        bail!(
+            "router 启动失败，看 ccms --router --logs（{}）",
+            paths.log.display()
+        )
     }
 }

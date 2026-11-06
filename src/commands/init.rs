@@ -29,7 +29,7 @@ pub fn run(paths: &Paths, force: bool) -> Result<()> {
     }
     println!(
         "{}",
-        style.dim("下一步: ccms key <provider> sk-...  →  ccms on  →  claude")
+        style.dim("下一步: ccms --key <provider> sk-...  →  ccms --on  →  claude")
     );
     Ok(())
 }

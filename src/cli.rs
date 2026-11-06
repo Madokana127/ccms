@@ -1,19 +1,15 @@
-use clap::{Parser, Subcommand};
+use clap::error::{ContextKind, ErrorKind};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use std::ffi::OsString;
 
-const AFTER_HELP: &str = "\
-档位      fable / opus / sonnet / haiku / subagent（哨兵模型 ccms-<tier>）
-配置      $CCMS_HOME，默认 ~/.config/ccms（三平台一致）
-密钥      keys.enc + keystore.key（AES-256-GCM），密钥池变量 <PROVIDER>_API_KEYS
-Claude    ~/.claude/settings.json，env 段由 ccms 独占，可用 CLAUDE_SETTINGS 覆盖
-旧写法    --on/--off/--key/--stats 等仍然可用，会自动映射到子命令";
+use crate::paths::Paths;
+use crate::term::Style;
 
 #[derive(Parser, Debug)]
 #[command(
     name = "ccms",
-    version,
-    about = "Claude Code Model Switcher — 为每个档位自由选择供应商与模型",
-    after_help = AFTER_HELP,
+    disable_help_flag = true,
+    disable_version_flag = true,
     arg_required_else_help = false
 )]
 pub struct Cli {
@@ -44,6 +40,9 @@ pub enum Command {
         provider: String,
         action: Option<String>,
         value: Option<String>,
+        /// 从 stdin 读取一把或多把 key（推荐，避免进入 shell history）
+        #[arg(long)]
+        stdin: bool,
     },
     /// 加密密钥库：status / seal / open / rekey
     Vault {
@@ -125,6 +124,225 @@ pub enum RouterCmd {
     Ensure,
 }
 
+/// 顶层旧 flag → 规范子命令。唯一映射表，新增命令只改这里。
+const TOP_ALIASES: &[(&str, &str)] = &[
+    ("--on", "on"),
+    ("-a", "on"),
+    ("--off", "off"),
+    ("-o", "off"),
+    ("--status", "status"),
+    ("--list", "list"),
+    ("-l", "list"),
+    ("--key", "key"),
+    ("-k", "key"),
+    ("--vault", "vault"),
+    ("--models", "models"),
+    ("-m", "models"),
+    ("--test", "test"),
+    ("-t", "test"),
+    ("--doctor", "doctor"),
+    ("-d", "doctor"),
+    ("--stats", "stats"),
+    ("-u", "stats"),
+    ("--route", "route"),
+    ("-r", "route"),
+    ("--router", "router"),
+    ("--init", "init"),
+];
+
+/// main 的 resolve_sub：裸词、--长名、既有短名统一到同一子命令。
+const ROUTE_SUBS: &[(&str, &str)] = &[
+    ("list", "list"),
+    ("--list", "list"),
+    ("-l", "list"),
+    ("set", "set"),
+    ("--set", "set"),
+    ("unset", "unset"),
+    ("--unset", "unset"),
+    ("all", "all"),
+    ("--all", "all"),
+];
+
+const ROUTER_SUBS: &[(&str, &str)] = &[
+    ("start", "start"),
+    ("--start", "start"),
+    ("stop", "stop"),
+    ("--stop", "stop"),
+    ("restart", "restart"),
+    ("--restart", "restart"),
+    ("status", "status"),
+    ("--status", "status"),
+    ("logs", "logs"),
+    ("--logs", "logs"),
+    ("run", "run"),
+    ("--run", "run"),
+    ("ensure", "ensure"),
+    ("--ensure", "ensure"),
+];
+
+const VAULT_SUBS: &[(&str, &str)] = &[
+    ("status", "status"),
+    ("--status", "status"),
+    ("seal", "seal"),
+    ("--seal", "seal"),
+    ("open", "open"),
+    ("--open", "open"),
+    ("rekey", "rekey"),
+    ("--rekey", "rekey"),
+];
+
+const MODERN_COMMANDS: &[&str] = &[
+    "init", "on", "off", "status", "list", "key", "vault", "models", "test", "route", "router",
+    "stats", "doctor", "version",
+];
+
+pub enum Prepared {
+    Help,
+    Version,
+    Run(Vec<OsString>),
+}
+
+fn alias(table: &[(&'static str, &'static str)], token: &str) -> Option<&'static str> {
+    table
+        .iter()
+        .find_map(|(from, to)| (*from == token).then_some(*to))
+}
+
+/// 把 main 的旧写法规范化成 clap 子命令 token；只解析命令位，不扫描参数值。
+pub fn prepare(args: Vec<OsString>) -> Result<Prepared, String> {
+    let mut iter = args.into_iter();
+    let program = iter.next().unwrap_or_else(|| OsString::from("ccms"));
+    let rest: Vec<OsString> = iter.collect();
+
+    let Some(first_os) = rest.first() else {
+        return Ok(Prepared::Run(vec![program]));
+    };
+    let first = first_os.to_string_lossy();
+
+    match first.as_ref() {
+        "-h" | "--help" => return Ok(Prepared::Help),
+        "-v" | "--version" => return Ok(Prepared::Version),
+        _ => {}
+    }
+
+    let canonical = if let Some(mapped) = alias(TOP_ALIASES, &first) {
+        mapped.to_string()
+    } else if MODERN_COMMANDS.contains(&first.as_ref()) {
+        first.to_string()
+    } else {
+        return Err(format!("✗ 未知命令: {first}（ccms --help/-h 看用法）"));
+    };
+
+    let mut out = vec![program, OsString::from(&canonical)];
+    let nested = &rest[1..];
+    match canonical.as_str() {
+        "route" => push_nested(
+            &mut out,
+            nested,
+            ROUTE_SUBS,
+            "list",
+            "未知子命令: {}（ccms --route/-r 看用法）",
+        )?,
+        "router" => push_nested(
+            &mut out,
+            nested,
+            ROUTER_SUBS,
+            "status",
+            "未知子命令: {}（ccms --router 看用法）",
+        )?,
+        "vault" => push_nested(
+            &mut out,
+            nested,
+            VAULT_SUBS,
+            "status",
+            "未知子命令: {}（ccms --help/-h 看用法）",
+        )?,
+        _ => out.extend(nested.iter().cloned()),
+    }
+
+    Ok(Prepared::Run(out))
+}
+
+fn push_nested(
+    out: &mut Vec<OsString>,
+    rest: &[OsString],
+    table: &[(&'static str, &'static str)],
+    default: &str,
+    error_template: &str,
+) -> Result<(), String> {
+    let start = usize::from(rest.first().is_some_and(|token| token == "--"));
+    match rest.get(start) {
+        None => out.push(OsString::from(default)),
+        Some(token) => {
+            let text = token.to_string_lossy();
+            match alias(table, &text) {
+                Some(mapped) => {
+                    out.push(OsString::from(mapped));
+                    out.extend(rest[start + 1..].iter().cloned());
+                }
+                None => return Err(format!("✗ {}", error_template.replace("{}", &text))),
+            }
+        }
+    }
+    Ok(())
+}
+
+fn scrubbed_command() -> clap::Command {
+    fn scrub(cmd: clap::Command) -> clap::Command {
+        cmd.disable_help_flag(true)
+            .disable_version_flag(true)
+            .mut_subcommands(scrub)
+    }
+    scrub(Cli::command())
+}
+
+pub fn parse_args(argv: &[OsString]) -> Result<Cli, String> {
+    let command = scrubbed_command();
+    match command.try_get_matches_from(argv.iter().cloned()) {
+        Ok(matches) => Cli::from_arg_matches(&matches),
+        Err(err) => Err(err),
+    }
+    .map_err(|err| format_parse_error(&err, argv))
+}
+
+fn format_parse_error(err: &clap::Error, argv: &[OsString]) -> String {
+    if matches!(
+        err.kind(),
+        ErrorKind::UnknownArgument | ErrorKind::InvalidSubcommand
+    ) {
+        let token = err
+            .get(ContextKind::InvalidArg)
+            .or_else(|| err.get(ContextKind::InvalidSubcommand))
+            .map(|value| value.to_string());
+        if let Some(token) = token {
+            return format!("✗ 未知命令或参数: {token}（ccms --help/-h 看用法）");
+        }
+    }
+    format!("✗ {}", usage_for(argv))
+}
+
+fn usage_for(argv: &[OsString]) -> &'static str {
+    let command = argv.get(1).map(|value| value.to_string_lossy().to_string());
+    let sub = argv.get(2).map(|value| value.to_string_lossy().to_string());
+    match (command.as_deref(), sub.as_deref()) {
+        (Some("key"), _) => "用法: ccms --key/-k <provider> <sk-...|--stdin|list|clear|remove <n>>",
+        (Some("models"), _) => "用法: ccms --models/-m <provider>",
+        (Some("test"), _) => "用法: ccms --test/-t <provider|router|all>",
+        (Some("route"), Some("set")) => "用法: ccms --route/-r --set <tier> <provider> <model>",
+        (Some("route"), Some("unset")) => "用法: ccms --route/-r --unset <tier>",
+        (Some("route"), Some("all")) => "用法: ccms --route/-r --all <provider> [model]",
+        (Some("route"), _) => "用法: ccms --route/-r <list|set|unset|all>",
+        (Some("router"), Some("logs")) => "用法: ccms --router --logs [n]",
+        (Some("router"), _) => "用法: ccms --router <start|stop|restart|status|logs>",
+        (Some("vault"), _) => "用法: ccms --vault <--status|--seal|--open|--rekey>",
+        (Some("stats"), _) => {
+            "用法: ccms --stats/-u [days] [--by model|provider|tier] [--json] [reset]"
+        }
+        (Some("init"), _) => "用法: ccms --init [--force]",
+        _ => "用法: ccms --help/-h",
+    }
+}
+
 pub fn print_version() {
     println!(
         "CCMS {} — Claude Code Model Switcher",
@@ -132,112 +350,245 @@ pub fn print_version() {
     );
 }
 
-/// 0.1 版的 `--on/-a` 等写法翻译成子命令，避免老脚本失效。
-pub fn translate_legacy(args: Vec<OsString>) -> Vec<OsString> {
-    const TOP: &[(&str, &str)] = &[
-        ("--on", "on"),
-        ("-a", "on"),
-        ("--off", "off"),
-        ("-o", "off"),
-        ("--status", "status"),
-        ("--list", "list"),
-        ("-l", "list"),
-        ("--key", "key"),
-        ("-k", "key"),
-        ("--models", "models"),
-        ("-m", "models"),
-        ("--test", "test"),
-        ("-t", "test"),
-        ("--doctor", "doctor"),
-        ("-d", "doctor"),
-        ("--stats", "stats"),
-        ("-u", "stats"),
-        ("--route", "route"),
-        ("-r", "route"),
-        ("--router", "router"),
-        ("--vault", "vault"),
-        ("--help", "help"),
-        ("-h", "help"),
-        ("--version", "version"),
-        ("-v", "version"),
-    ];
-    const SUB: &[&str] = &[
-        "list", "set", "unset", "all", "start", "stop", "restart", "status", "logs", "seal",
-        "open", "rekey", "reset", "ensure", "run",
-    ];
+/// main 的旧式长 flag 帮助页（不再使用 clap 的 Usage/Commands 页面）。
+pub fn print_help(paths: &Paths) {
+    let style = Style::detect();
+    let group = |text: &str| style.cyan(text);
 
-    let mut out: Vec<OsString> = Vec::with_capacity(args.len());
-    let mut iter = args.into_iter();
-    let Some(program) = iter.next() else {
-        return out;
-    };
-    out.push(program);
-
-    let mut first = true;
-    for arg in iter {
-        let text = arg.to_string_lossy().to_string();
-        if first {
-            first = false;
-            if let Some((_, mapped)) = TOP.iter().find(|(flag, _)| *flag == text) {
-                out.push(OsString::from(*mapped));
-                continue;
-            }
-        }
-        let trimmed = text.strip_prefix("--").unwrap_or(&text);
-        if (text.starts_with("--") || text == "-l") && SUB.contains(&trimmed) {
-            out.push(OsString::from(trimmed));
-            continue;
-        }
-        out.push(arg);
-    }
-    out
+    println!(
+        "{} — Claude Code Model Switcher  v{}",
+        style.cyan("CCMS"),
+        env!("CARGO_PKG_VERSION")
+    );
+    println!("适用于Claude Code的Provider自由切换工具");
+    println!();
+    println!("{}  ccms [--命令/-x] [参数]", group("用法"));
+    println!("      不带参数仅显示模式与路由");
+    println!();
+    println!("{}", group("模式"));
+    println!("  --on/-a      启用路由");
+    println!("  --off/-o     关闭路由");
+    println!("  --status     详细状态");
+    println!();
+    println!("{}", group("接入"));
+    println!("  --init                     初始化配置目录（--force 重置为内置默认）");
+    println!("  --key/-k");
+    println!("      <provider> <sk-...>    追加到密钥池");
+    println!("      <provider> --stdin     从 stdin 读取一把或多把 key（推荐）");
+    println!("      <provider> list        查看密钥池");
+    println!("      <provider> remove <n>  移除第 n 把");
+    println!("      <provider> clear       清空密钥池");
+    println!("  --models/-m");
+    println!("      <provider>             列出可用模型");
+    println!("  --list/-l                  列出 provider");
+    println!();
+    println!("{}", group("密钥库"));
+    println!("  --vault");
+    println!("      --status                   查看加密状态与主密钥");
+    println!("      --seal                     加密现有明文密钥");
+    println!("      --open                     输出明文密钥");
+    println!("      --rekey                    轮换主密钥");
+    println!();
+    println!("{}", group("路由"));
+    println!("  --route/-r");
+    println!("      --list/-l                          查看路由表");
+    println!("      --set <tier> <provider> <model>    修改路由");
+    println!("      --unset <tier>                     删除路由");
+    println!("      --all <provider> [model]           五档统一到一家");
+    println!("  --router");
+    println!("      --start      启动");
+    println!("      --stop       停止");
+    println!("      --restart    重启");
+    println!("      --status     状态");
+    println!("      --logs [n]   日志");
+    println!();
+    println!("{}", group("调试"));
+    println!("  --test/-t");
+    println!("      <provider|router|all>  验证链路");
+    println!("  --doctor/-d                环境自检");
+    println!("  --version/-v               名称与版本");
+    println!("  --help/-h                  帮助");
+    println!();
+    println!("{}", group("统计"));
+    println!("  --stats/-u [days]          用量统计（默认 7 天）");
+    println!("      --by <model|provider|tier>  按维度查看");
+    println!("      --json                 输出 JSON");
+    println!("      reset                  清空统计");
+    println!();
+    println!("tier: opus / sonnet / haiku / fable / subagent");
+    println!();
+    println!("{}", group("文件"));
+    println!("  routes.json     {}", paths.routes.display());
+    println!("  providers.json  {}", paths.providers.display());
+    println!("  keys.env        {}", paths.keys_env.display());
+    println!("  keys.enc        {}", paths.keys_enc.display());
+    println!("  keystore.key    {}", paths.keyfile.display());
+    println!("  settings.json   {}", paths.settings.display());
+    println!("  stats.json      {}", paths.stats.display());
+    println!();
+    println!("{}", group("示例"));
+    println!("  ccms --init");
+    println!("  printf 'sk-xxx\\n' | ccms --key kimi --stdin");
+    println!("  ccms --key kimi sk-xxx");
+    println!("  ccms --route --all qwen");
+    println!("  ccms --stats --by model");
+    println!("  ccms --on");
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn translate(input: &[&str]) -> Vec<String> {
+    fn normalized(input: &[&str]) -> Vec<String> {
         let args = std::iter::once("ccms")
             .chain(input.iter().copied())
             .map(OsString::from)
             .collect();
-        translate_legacy(args)
-            .into_iter()
-            .map(|arg| arg.to_string_lossy().to_string())
-            .collect()
+        match prepare(args).expect("prepare") {
+            Prepared::Run(argv) => argv
+                .into_iter()
+                .map(|arg| arg.to_string_lossy().to_string())
+                .collect(),
+            _ => panic!("expected run"),
+        }
+    }
+
+    fn expect(input: &[&str]) -> Vec<String> {
+        input.iter().map(|value| value.to_string()).collect()
     }
 
     #[test]
     fn legacy_flags_map_to_subcommands() {
-        assert_eq!(translate(&["--on"]), vec!["ccms", "on"]);
+        assert_eq!(normalized(&["--on"]), expect(&["ccms", "on"]));
         assert_eq!(
-            translate(&["-k", "kimi", "sk-x"]),
-            vec!["ccms", "key", "kimi", "sk-x"]
+            normalized(&["-k", "kimi", "sk-x"]),
+            expect(&["ccms", "key", "kimi", "sk-x"])
         );
         assert_eq!(
-            translate(&["--route", "--list"]),
-            vec!["ccms", "route", "list"]
+            normalized(&["--stats", "--json"]),
+            expect(&["ccms", "stats", "--json"])
         );
         assert_eq!(
-            translate(&["--stats", "--json"]),
-            vec!["ccms", "stats", "--json"]
+            normalized(&["--stats", "reset"]),
+            expect(&["ccms", "stats", "reset"])
         );
         assert_eq!(
-            translate(&["--stats", "reset"]),
-            vec!["ccms", "stats", "reset"]
+            normalized(&["--vault", "--status"]),
+            expect(&["ccms", "vault", "status"])
+        );
+    }
+
+    #[test]
+    fn every_legacy_top_level_form_is_known() {
+        for (legacy, canonical) in [
+            ("-a", "on"),
+            ("--on", "on"),
+            ("-o", "off"),
+            ("--off", "off"),
+            ("--status", "status"),
+            ("-l", "list"),
+            ("--list", "list"),
+            ("-k", "key"),
+            ("--key", "key"),
+            ("-m", "models"),
+            ("--models", "models"),
+            ("-t", "test"),
+            ("--test", "test"),
+            ("-d", "doctor"),
+            ("--doctor", "doctor"),
+            ("-u", "stats"),
+            ("--stats", "stats"),
+            ("--init", "init"),
+        ] {
+            assert_eq!(
+                normalized(&[legacy]),
+                expect(&["ccms", canonical]),
+                "{legacy}"
+            );
+        }
+        for (legacy, canonical, default) in [
+            ("-r", "route", "list"),
+            ("--route", "route", "list"),
+            ("--router", "router", "status"),
+            ("--vault", "vault", "status"),
+        ] {
+            assert_eq!(
+                normalized(&[legacy]),
+                expect(&["ccms", canonical, default]),
+                "{legacy}"
+            );
+        }
+        for flag in ["-h", "--help"] {
+            let args = ["ccms", flag].into_iter().map(OsString::from).collect();
+            assert!(matches!(prepare(args), Ok(Prepared::Help)), "{flag}");
+        }
+        for flag in ["-v", "--version"] {
+            let args = ["ccms", flag].into_iter().map(OsString::from).collect();
+            assert!(matches!(prepare(args), Ok(Prepared::Version)), "{flag}");
+        }
+    }
+
+    #[test]
+    fn nested_short_and_long_flags_resolve() {
+        assert_eq!(
+            normalized(&["-r", "-l"]),
+            expect(&["ccms", "route", "list"])
         );
         assert_eq!(
-            translate(&["--vault", "--status"]),
-            vec!["ccms", "vault", "status"]
+            normalized(&["-r", "--list"]),
+            expect(&["ccms", "route", "list"])
+        );
+        assert_eq!(
+            normalized(&["--route", "--set", "opus", "kimi", "m"]),
+            expect(&["ccms", "route", "set", "opus", "kimi", "m"])
+        );
+        assert_eq!(
+            normalized(&["--router", "--logs", "5"]),
+            expect(&["ccms", "router", "logs", "5"])
+        );
+    }
+
+    #[test]
+    fn nested_values_are_not_translated_as_subcommands() {
+        assert_eq!(
+            normalized(&["--route", "--set", "opus", "kimi", "--list"]),
+            expect(&["ccms", "route", "set", "opus", "kimi", "--list"])
+        );
+    }
+
+    #[test]
+    fn nested_defaults_follow_main() {
+        assert_eq!(normalized(&["--route"]), expect(&["ccms", "route", "list"]));
+        assert_eq!(
+            normalized(&["--router"]),
+            expect(&["ccms", "router", "status"])
+        );
+        assert_eq!(
+            normalized(&["--vault"]),
+            expect(&["ccms", "vault", "status"])
         );
     }
 
     #[test]
     fn modern_commands_are_untouched() {
         assert_eq!(
-            translate(&["route", "set", "opus", "kimi", "kimi-k3"]),
-            vec!["ccms", "route", "set", "opus", "kimi", "kimi-k3"]
+            normalized(&["route", "set", "opus", "kimi", "kimi-k3"]),
+            expect(&["ccms", "route", "set", "opus", "kimi", "kimi-k3"])
         );
+        assert_eq!(
+            normalized(&["stats", "--json"]),
+            expect(&["ccms", "stats", "--json"])
+        );
+    }
+
+    #[test]
+    fn unknown_nested_is_rejected() {
+        assert!(prepare(
+            ["ccms", "--route", "frob"]
+                .into_iter()
+                .map(OsString::from)
+                .collect()
+        )
+        .is_err());
     }
 }

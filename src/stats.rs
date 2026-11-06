@@ -89,11 +89,13 @@ fn default_version() -> u32 {
     2
 }
 
-pub fn load(path: &Path) -> Stats {
-    fs::read_to_string(path)
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default()
+pub fn load(path: &Path) -> Result<Stats> {
+    match fs::read_to_string(path) {
+        Ok(text) => serde_json::from_str(&text)
+            .with_context(|| format!("{} 已损坏或不是合法统计 JSON", path.display())),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Stats::default()),
+        Err(err) => Err(err).with_context(|| format!("读取统计文件 {}", path.display())),
+    }
 }
 
 pub fn today() -> String {
@@ -111,7 +113,7 @@ pub fn record(
     error: bool,
     duration_ms: u64,
 ) -> Result<()> {
-    let mut stats = load(path);
+    let mut stats = load(path)?;
     let day = stats.daily.entry(today()).or_default();
 
     let mut delta = Bucket {
@@ -387,5 +389,58 @@ mod tests {
         assert_eq!(n(999), "999");
         assert_eq!(n(1234), "1,234");
         assert_eq!(n(1234567), "1,234,567");
+    }
+
+    #[test]
+    fn load_defaults_only_when_file_is_missing() {
+        let dir = std::env::temp_dir().join(format!("ccms-stats-load-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let missing = dir.join("missing.json");
+        assert_eq!(
+            load(&missing).unwrap().daily.len(),
+            0,
+            "NotFound 才返回空统计"
+        );
+
+        let not_a_file = dir.join("directory");
+        fs::create_dir(&not_a_file).unwrap();
+        assert!(load(&not_a_file).is_err(), "其他 I/O 错误必须向上传播");
+    }
+
+    #[test]
+    fn corrupt_stats_are_reported_and_never_overwritten() {
+        let dir = std::env::temp_dir().join(format!("ccms-stats-corrupt-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("stats.json");
+        let corrupt = br#"{"version":2,"daily":{"2026-01-01":{"total":"broken"#.to_vec();
+        fs::write(&path, &corrupt).unwrap();
+
+        let err = record(
+            &path,
+            "sonnet",
+            "p",
+            "m",
+            Some(Usage {
+                input: 1,
+                output: 2,
+                cache_read: 0,
+                cache_create: 0,
+            }),
+            0,
+            false,
+            5,
+        )
+        .expect_err("损坏的 stats 不得被当成空文件覆盖");
+        assert!(
+            format!("{err:#}").contains("stats") || format!("{err:#}").contains("统计"),
+            "错误应能定位 stats: {err:#}"
+        );
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            corrupt,
+            "失败后原文件字节必须不变"
+        );
     }
 }

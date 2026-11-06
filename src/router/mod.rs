@@ -16,7 +16,7 @@ use axum::routing::get;
 use axum::Router;
 use bytes::Bytes;
 use chrono::Utc;
-use futures_util::StreamExt;
+use futures_util::{Stream, StreamExt};
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::ReceiverStream;
@@ -28,6 +28,8 @@ use crate::paths::Paths;
 use crate::stats::{self, Usage};
 
 const MAX_BODY: usize = 128 * 1024 * 1024;
+/// 非流式上游响应的实际字节上限；Content-Length 只用于提前拒绝。
+const MAX_RESPONSE_BODY: usize = 16 * 1024 * 1024;
 
 type Stamp = Option<(SystemTime, u64)>;
 
@@ -37,13 +39,57 @@ fn stamp(path: &Path) -> Stamp {
         .and_then(|meta| Some((meta.modified().ok()?, meta.len())))
 }
 
+static LOG_WRITE_LOCK: Mutex<()> = Mutex::new(());
+const LOG_MAX_BYTES: u64 = 5 * 1024 * 1024;
+
 pub fn log_line(path: &Path, line: &str) {
+    if let Err(err) = log_line_with_limit(path, line, LOG_MAX_BYTES) {
+        eprintln!("ccms: 写日志 {} 失败: {err:#}", path.display());
+    }
+}
+
+fn log_line_with_limit(path: &Path, line: &str, max_bytes: u64) -> Result<()> {
     let ts = Utc::now().format("%Y-%m-%d %H:%M:%S");
     let entry = format!("[{ts}] {line}\n");
-    use std::io::Write;
-    if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
-        let _ = file.write_all(entry.as_bytes());
+    let _guard = LOG_WRITE_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+
+    let existing = match fs::metadata(path) {
+        Ok(meta) => meta.len(),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(err) => {
+            return Err(err).with_context(|| format!("读取日志大小失败: {}", path.display()))
+        }
+    };
+    if existing > 0 && existing.saturating_add(entry.len() as u64) > max_bytes {
+        let backup = path.with_extension("log.1");
+        match fs::remove_file(&backup) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("删除旧日志备份失败: {}", backup.display()))
+            }
+        }
+        fs::rename(path, &backup)
+            .with_context(|| format!("轮转日志失败: {} -> {}", path.display(), backup.display()))?;
     }
+
+    if let Some(dir) = path.parent() {
+        if !dir.as_os_str().is_empty() {
+            fs::create_dir_all(dir)
+                .with_context(|| format!("创建日志目录失败: {}", dir.display()))?;
+        }
+    }
+
+    use std::io::Write;
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("打开日志失败: {}", path.display()))?;
+    file.write_all(entry.as_bytes())
+        .with_context(|| format!("写入日志失败: {}", path.display()))?;
+    Ok(())
 }
 
 /// 路由与 provider 按 mtime 热加载：改完配置无需重启 router。
@@ -124,15 +170,19 @@ impl KeysCache {
             return;
         }
         match vault.load() {
-            Ok(map) => self.map = Arc::new(map),
+            Ok(map) => {
+                self.map = Arc::new(map);
+                // 只有成功才写 stamps / loaded；失败必须让下一次请求重试。
+                self.enc_stamp = enc_stamp;
+                self.key_stamp = key_stamp;
+                self.loaded = true;
+            }
             Err(err) => {
                 log_line(log, &format!("密钥库读取失败: {err:#}"));
                 self.map = Arc::new(BTreeMap::new());
+                self.loaded = false;
             }
         }
-        self.enc_stamp = enc_stamp;
-        self.key_stamp = key_stamp;
-        self.loaded = true;
     }
 }
 
@@ -145,10 +195,16 @@ pub struct AppState {
     keys: Arc<Mutex<KeysCache>>,
     cursor: Arc<Mutex<HashMap<String, usize>>>,
     stats_lock: Arc<tokio::sync::Mutex<()>>,
+    router_token: Arc<String>,
 }
 
 impl AppState {
-    fn new(paths: Paths, client: reqwest::Client, config: ConfigCache) -> Self {
+    fn new(
+        paths: Paths,
+        client: reqwest::Client,
+        config: ConfigCache,
+        router_token: String,
+    ) -> Self {
         Self {
             paths,
             client,
@@ -157,6 +213,7 @@ impl AppState {
             keys: Arc::new(Mutex::new(KeysCache::empty())),
             cursor: Arc::new(Mutex::new(HashMap::new())),
             stats_lock: Arc::new(tokio::sync::Mutex::new(())),
+            router_token: Arc::new(router_token),
         }
     }
 
@@ -202,17 +259,28 @@ impl AppState {
         duration_ms: u64,
     ) {
         let _guard = self.stats_lock.lock().await;
-        if let Err(err) = stats::record(
-            &self.paths.stats,
-            tier,
-            provider,
-            model,
-            usage,
-            u64::from(retries),
-            error,
-            duration_ms,
-        ) {
-            self.log(&format!("stats error: {err:#}"));
+        let path = self.paths.stats.clone();
+        let tier = tier.to_string();
+        let provider = provider.to_string();
+        let model = model.to_string();
+        let result = tokio::task::spawn_blocking(move || {
+            stats::record(
+                &path,
+                &tier,
+                &provider,
+                &model,
+                usage,
+                u64::from(retries),
+                error,
+                duration_ms,
+            )
+        })
+        .await;
+
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => self.log(&format!("stats error: {err:#}")),
+            Err(err) => self.log(&format!("stats task error: {err}")),
         }
     }
 }
@@ -240,12 +308,13 @@ pub async fn run(paths: Paths) -> Result<()> {
         match vault.migrate_legacy() {
             Ok(Some(count)) => println!("ccms: 已将 {count} 个明文密钥迁移进 keys.enc"),
             Ok(None) => {}
-            Err(err) => eprintln!("ccms: 明文密钥迁移失败: {err:#}"),
+            Err(err) => return Err(err).context("明文密钥迁移失败，router 拒绝以明文路径启动"),
         }
     }
 
     let cache = ConfigCache::load(&paths)?;
-    let state = AppState::new(paths.clone(), client, cache);
+    let router_token = crate::token::ensure(&paths)?;
+    let state = AppState::new(paths.clone(), client, cache, router_token);
 
     let app = Router::new()
         .route("/ccms/health", get(health))
@@ -257,8 +326,9 @@ pub async fn run(paths: Paths) -> Result<()> {
     let listener = match TcpListener::bind(addr).await {
         Ok(listener) => listener,
         Err(err) if err.kind() == std::io::ErrorKind::AddrInUse => {
-            println!("ccms router: {listen} 已被占用（可能已经在运行）");
-            return Ok(());
+            return Err(err).with_context(|| {
+                format!("无法监听 {listen}：地址已被占用（可能已有 router 在运行）")
+            });
         }
         Err(err) => {
             return Err(err).with_context(|| format!("无法监听 {listen}"));
@@ -321,6 +391,7 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
     Json(json!({
         "ok": true,
         "service": "ccms",
+        "pid": std::process::id(),
         "version": env!("CARGO_PKG_VERSION"),
         "uptime_s": state.started.elapsed().as_secs(),
         "listen": routes.listen,
@@ -331,7 +402,15 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
     }))
 }
 
-async fn models(State(state): State<AppState>) -> Json<Value> {
+async fn models(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if !crate::token::authorized(&headers, &state.router_token) {
+        state.log("401 /v1/models 未授权");
+        return json_error(
+            StatusCode::UNAUTHORIZED,
+            "authentication_error",
+            "ccms: router token 无效或缺失",
+        );
+    }
     let (routes, _) = state.snapshot();
     let created = Utc::now().to_rfc3339();
     let data: Vec<Value> = routes
@@ -364,6 +443,7 @@ async fn models(State(state): State<AppState>) -> Json<Value> {
         "first_id": first,
         "last_id": last,
     }))
+    .into_response()
 }
 
 fn skip_request_header(name: &HeaderName) -> bool {
@@ -372,11 +452,16 @@ fn skip_request_header(name: &HeaderName) -> bool {
         "host"
             | "authorization"
             | "x-api-key"
+            | "proxy-authorization"
+            | "cookie"
             | "content-length"
             | "connection"
             | "keep-alive"
             | "proxy-connection"
             | "transfer-encoding"
+            | "te"
+            | "trailer"
+            | "upgrade"
             | "accept-encoding"
     )
 }
@@ -384,8 +469,56 @@ fn skip_request_header(name: &HeaderName) -> bool {
 fn skip_response_header(name: &HeaderName) -> bool {
     matches!(
         name.as_str(),
-        "content-length" | "transfer-encoding" | "connection" | "keep-alive"
+        "content-length"
+            | "transfer-encoding"
+            | "connection"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "te"
+            | "trailer"
+            | "upgrade"
     )
+}
+
+/// `Connection: foo, bar` 列出的字段同样是逐跳的，必须在转发前剔除。
+fn connection_tokens(headers: &HeaderMap) -> Vec<String> {
+    headers
+        .get_all(header::CONNECTION)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .map(|token| token.trim().to_ascii_lowercase())
+        .filter(|token| !token.is_empty())
+        .collect()
+}
+
+fn forwarded_request_headers(headers: &HeaderMap) -> Vec<(HeaderName, HeaderValue)> {
+    let extra = connection_tokens(headers);
+    headers
+        .iter()
+        .filter(|(name, _)| {
+            !skip_request_header(name)
+                && !extra
+                    .iter()
+                    .any(|token| token.eq_ignore_ascii_case(name.as_str()))
+        })
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect()
+}
+
+fn forwarded_response_headers(headers: &HeaderMap) -> HeaderMap {
+    let extra = connection_tokens(headers);
+    let mut out = HeaderMap::new();
+    for (name, value) in headers {
+        if !skip_response_header(name)
+            && !extra
+                .iter()
+                .any(|token| token.eq_ignore_ascii_case(name.as_str()))
+        {
+            out.insert(name.clone(), value.clone());
+        }
+    }
+    out
 }
 
 fn json_error(status: StatusCode, kind: &str, message: &str) -> Response {
@@ -400,6 +533,84 @@ fn json_error(status: StatusCode, kind: &str, message: &str) -> Response {
         HeaderValue::from_static("application/json"),
     );
     response
+}
+
+type SseSender = tokio::sync::mpsc::Sender<Result<Bytes, std::io::Error>>;
+
+#[derive(Debug, PartialEq, Eq)]
+enum BodyLimitError {
+    /// 声明的 Content-Length 已超限，无需读取正文。
+    Declared(u64),
+    /// 实际收到的 chunk 累计超限（chunked 传输没有可信长度）。
+    Actual(usize),
+    Read(String),
+}
+
+impl std::fmt::Display for BodyLimitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Declared(len) => write!(f, "Content-Length {len} 超过上限"),
+            Self::Actual(len) => write!(f, "实际读取 {len} 字节超过上限"),
+            Self::Read(err) => write!(f, "读取失败: {err}"),
+        }
+    }
+}
+
+fn check_declared(declared: Option<u64>, limit: usize) -> Result<(), BodyLimitError> {
+    match declared {
+        Some(len) if len > limit as u64 => Err(BodyLimitError::Declared(len)),
+        _ => Ok(()),
+    }
+}
+
+async fn collect_limited<S, E>(mut stream: S, limit: usize) -> Result<Bytes, BodyLimitError>
+where
+    S: Stream<Item = Result<Bytes, E>> + Unpin,
+    E: std::fmt::Display,
+{
+    let mut buf = bytes::BytesMut::new();
+    while let Some(item) = stream.next().await {
+        let chunk = item.map_err(|err| BodyLimitError::Read(err.to_string()))?;
+        let total = buf.len().saturating_add(chunk.len());
+        if total > limit {
+            return Err(BodyLimitError::Actual(total));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf.freeze())
+}
+
+/// 转发 SSE 流。返回是否在上游读取阶段失败。
+///
+/// 客户端断开后 `tx.closed()` 立即完成，不必等上游再发下一个 chunk；
+/// helper 返回时 `stream`（连带 reqwest response）被 drop，上游请求随即取消。
+async fn forward_sse<S, E>(mut stream: S, tx: &SseSender, parser: &mut sse::Parser) -> bool
+where
+    S: Stream<Item = Result<Bytes, E>> + Unpin,
+    E: std::fmt::Display,
+{
+    let mut failed = false;
+    loop {
+        tokio::select! {
+            biased;
+            _ = tx.closed() => break,
+            item = stream.next() => match item {
+                Some(Ok(chunk)) => {
+                    parser.feed(&chunk);
+                    if tx.send(Ok(chunk)).await.is_err() {
+                        break;
+                    }
+                }
+                Some(Err(err)) => {
+                    failed = true;
+                    let _ = tx.send(Err(std::io::Error::other(err.to_string()))).await;
+                    break;
+                }
+                None => break,
+            }
+        }
+    }
+    failed
 }
 
 /// 档位解析：先认 `ccms-<tier>` 哨兵名，再认模型名里的档位关键字，最后落到默认档位。
@@ -442,6 +653,16 @@ fn extract_usage(value: &Value) -> Option<Usage> {
 async fn proxy(State(state): State<AppState>, request: Request) -> Response {
     let started = Instant::now();
     let (parts, body) = request.into_parts();
+
+    if !crate::token::authorized(&parts.headers, &state.router_token) {
+        // 只记录方法与路径，绝不记录凭据。
+        state.log(&format!("401 {} {} 未授权", parts.method, parts.uri.path()));
+        return json_error(
+            StatusCode::UNAUTHORIZED,
+            "authentication_error",
+            "ccms: router token 无效或缺失",
+        );
+    }
 
     let raw_body = match to_bytes(body, MAX_BODY).await {
         Ok(bytes) => bytes,
@@ -499,7 +720,7 @@ async fn proxy(State(state): State<AppState>, request: Request) -> Response {
             StatusCode::UNAUTHORIZED,
             "authentication_error",
             &format!(
-                "ccms: {} 没有可用 key，运行 ccms key {} sk-xxx",
+                "ccms: {} 没有可用 key，运行 ccms --key/-k {} sk-xxx",
                 route.provider, route.provider
             ),
         );
@@ -524,12 +745,7 @@ async fn proxy(State(state): State<AppState>, request: Request) -> Response {
     let url = format!("{base}{path_and_query}");
     let is_count_tokens = parts.uri.path().ends_with("/count_tokens");
 
-    let headers: Vec<(HeaderName, HeaderValue)> = parts
-        .headers
-        .iter()
-        .filter(|(name, _)| !skip_request_header(name))
-        .map(|(name, value)| (name.clone(), value.clone()))
-        .collect();
+    let headers = forwarded_request_headers(&parts.headers);
     let has_anthropic_version = headers
         .iter()
         .any(|(name, _)| name.as_str() == "anthropic-version");
@@ -656,12 +872,7 @@ async fn proxy(State(state): State<AppState>, request: Request) -> Response {
         return Json(json!({ "input_tokens": estimate })).into_response();
     }
 
-    let mut out_headers = HeaderMap::new();
-    for (name, value) in response.headers() {
-        if !skip_response_header(name) {
-            out_headers.insert(name.clone(), value.clone());
-        }
-    }
+    let out_headers = forwarded_response_headers(response.headers());
     let content_type = response
         .headers()
         .get(header::CONTENT_TYPE)
@@ -671,12 +882,37 @@ async fn proxy(State(state): State<AppState>, request: Request) -> Response {
     let is_sse = content_type.contains("text/event-stream");
 
     if !is_sse {
-        let body = match tokio::time::timeout(
+        if let Err(err) = check_declared(response.content_length(), MAX_RESPONSE_BODY) {
+            let elapsed = started.elapsed().as_millis() as u64;
+            state
+                .record(
+                    &tier,
+                    &route.provider,
+                    &route.model,
+                    None,
+                    attempt.saturating_sub(1),
+                    true,
+                    elapsed,
+                )
+                .await;
+            state.log(&format!("{tier} 上游响应超限: {err}"));
+            return json_error(
+                StatusCode::BAD_GATEWAY,
+                "api_error",
+                &format!(
+                    "ccms: 上游响应超过 {} MiB 上限（{err}）",
+                    MAX_RESPONSE_BODY / (1024 * 1024)
+                ),
+            );
+        }
+
+        let collected = tokio::time::timeout(
             Duration::from_millis(routes.retry.response_timeout_ms.max(5_000)),
-            response.bytes(),
+            collect_limited(response.bytes_stream(), MAX_RESPONSE_BODY),
         )
-        .await
-        {
+        .await;
+
+        let body = match collected {
             Ok(Ok(bytes)) => bytes,
             Ok(Err(err)) => {
                 let elapsed = started.elapsed().as_millis() as u64;
@@ -692,11 +928,20 @@ async fn proxy(State(state): State<AppState>, request: Request) -> Response {
                     )
                     .await;
                 state.log(&format!("{tier} 读取响应失败: {err}"));
-                return json_error(
-                    StatusCode::BAD_GATEWAY,
-                    "api_error",
-                    &format!("ccms: 读取上游响应失败（{err}）"),
-                );
+                let (status, message) = match err {
+                    BodyLimitError::Read(_) => (
+                        StatusCode::BAD_GATEWAY,
+                        format!("ccms: 读取上游响应失败（{err}）"),
+                    ),
+                    _ => (
+                        StatusCode::BAD_GATEWAY,
+                        format!(
+                            "ccms: 上游响应超过 {} MiB 上限（{err}）",
+                            MAX_RESPONSE_BODY / (1024 * 1024)
+                        ),
+                    ),
+                };
+                return json_error(status, "api_error", &message);
             }
             Err(_) => {
                 let elapsed = started.elapsed().as_millis() as u64;
@@ -761,23 +1006,7 @@ async fn proxy(State(state): State<AppState>, request: Request) -> Response {
 
     tokio::spawn(async move {
         let mut parser = sse::Parser::default();
-        let mut stream = response.bytes_stream();
-        let mut failed = false;
-        while let Some(item) = stream.next().await {
-            match item {
-                Ok(chunk) => {
-                    parser.feed(&chunk);
-                    if tx.send(Ok(chunk)).await.is_err() {
-                        break;
-                    }
-                }
-                Err(err) => {
-                    failed = true;
-                    let _ = tx.send(Err(std::io::Error::other(err.to_string()))).await;
-                    break;
-                }
-            }
-        }
+        let failed = forward_sse(response.bytes_stream(), &tx, &mut parser).await;
         let elapsed = started.elapsed().as_millis() as u64;
         task_state
             .record(
@@ -833,5 +1062,337 @@ mod tests {
         assert_eq!(usage.cache_read, 2);
         assert_eq!(usage.cache_create, 0);
         assert!(extract_usage(&serde_json::json!({})).is_none());
+    }
+
+    #[tokio::test]
+    async fn response_body_limit_rejects_declared_and_actual_overflow() {
+        assert_eq!(
+            check_declared(Some(17), 16),
+            Err(BodyLimitError::Declared(17)),
+            "声明超限应提前拒绝"
+        );
+        assert_eq!(check_declared(Some(16), 16), Ok(()));
+        assert_eq!(check_declared(None, 16), Ok(()), "chunked 没有长度声明");
+
+        let chunked = futures_util::stream::iter(vec![
+            Ok::<Bytes, std::io::Error>(Bytes::from_static(b"01234567")),
+            Ok::<Bytes, std::io::Error>(Bytes::from_static(b"89abcdef")),
+            Ok::<Bytes, std::io::Error>(Bytes::from_static(b"overflow!")),
+        ]);
+        assert_eq!(
+            collect_limited(chunked, 16).await,
+            Err(BodyLimitError::Actual(25)),
+            "chunked 实际累计超限也必须拒绝"
+        );
+
+        let normal = futures_util::stream::iter(vec![
+            Ok::<Bytes, std::io::Error>(Bytes::from_static(b"hello")),
+            Ok::<Bytes, std::io::Error>(Bytes::from_static(b" ")),
+            Ok::<Bytes, std::io::Error>(Bytes::from_static(b"world")),
+        ]);
+        assert_eq!(
+            collect_limited(normal, 100).await.unwrap(),
+            Bytes::from_static(b"hello world"),
+            "正常 body 必须逐字节不变"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_stats_records_are_not_lost() {
+        let home =
+            std::env::temp_dir().join(format!("ccms-stats-concurrent-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).unwrap();
+        fs::write(
+            home.join("routes.json"),
+            r#"{"listen":"127.0.0.1:1","default":"sonnet","routes":{"sonnet":{"provider":"p","model":"m"}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            home.join("providers.json"),
+            r#"{"p":{"base_url":"http://127.0.0.1:1"}}"#,
+        )
+        .unwrap();
+
+        let paths = Paths {
+            routes: home.join("routes.json"),
+            providers: home.join("providers.json"),
+            keys_env: home.join("keys.env"),
+            keys_enc: home.join("keys.enc"),
+            keyfile: home.join("keystore.key"),
+            lock: home.join("keystore.lock"),
+            rekey_journal: home.join("keystore.rekey.journal"),
+            rekey_enc_backup: home.join("keys.enc.rekey.bak"),
+            rekey_key_backup: home.join("keystore.key.rekey.bak"),
+            stats: home.join("stats.json"),
+            log: home.join("router.log"),
+            pid: home.join("router.pid"),
+            router_token: home.join("router.token"),
+            settings: home.join("settings.json"),
+            settings_previous: home.join("settings.previous.json"),
+            home: home.clone(),
+        };
+        let cache = ConfigCache::load(&paths).unwrap();
+        let client = crate::http::upstream(None, None).unwrap();
+        let state = AppState::new(paths.clone(), client, cache, "test-token".into());
+
+        let total = 32;
+        let mut handles = Vec::new();
+        for _ in 0..total {
+            let state = state.clone();
+            handles.push(tokio::spawn(async move {
+                state
+                    .record(
+                        "sonnet",
+                        "p",
+                        "m",
+                        Some(Usage {
+                            input: 1,
+                            output: 2,
+                            cache_read: 0,
+                            cache_create: 0,
+                        }),
+                        0,
+                        false,
+                        5,
+                    )
+                    .await;
+            }));
+        }
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        let recorded = stats::load(&paths.stats).unwrap();
+        let day = recorded.daily.get(&stats::today()).expect("当天统计应存在");
+        assert_eq!(day.total.requests, total, "并发记录不得丢失");
+        assert_eq!(day.total.input_tokens, total);
+        assert_eq!(day.models["p/m"].requests, total);
+        assert_eq!(day.providers["p"].requests, total);
+        assert_eq!(day.tiers["sonnet"].requests, total);
+    }
+
+    #[test]
+    fn hop_by_hop_and_local_credentials_are_not_forwarded() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::CONNECTION,
+            HeaderValue::from_static("x-custom-hop, keep-alive"),
+        );
+        headers.insert("x-custom-hop", HeaderValue::from_static("drop-me"));
+        headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
+        headers.insert("cookie", HeaderValue::from_static("session=local"));
+        headers.insert(
+            "proxy-authorization",
+            HeaderValue::from_static("Basic local-secret"),
+        );
+        headers.insert("x-api-key", HeaderValue::from_static("local-token"));
+
+        let forwarded = forwarded_request_headers(&headers);
+        let names: Vec<&str> = forwarded.iter().map(|(name, _)| name.as_str()).collect();
+        assert!(names.contains(&"anthropic-version"), "端到端头应保留");
+        assert!(
+            !names.contains(&"x-custom-hop"),
+            "Connection 指定字段不得转发"
+        );
+        assert!(!names.contains(&"cookie"), "本机 cookie 不得转发给上游");
+        assert!(
+            !names.contains(&"proxy-authorization"),
+            "Proxy-Authorization 是逐跳凭据"
+        );
+        assert!(!names.contains(&"connection"));
+        assert!(!names.contains(&"keep-alive"));
+        assert!(!names.contains(&"x-api-key"), "本机 router token 不得外传");
+    }
+
+    #[test]
+    fn response_connection_named_headers_are_stripped() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::CONNECTION,
+            HeaderValue::from_static("x-upstream-hop"),
+        );
+        headers.insert("x-upstream-hop", HeaderValue::from_static("drop-me"));
+        headers.insert("x-request-id", HeaderValue::from_static("keep-me"));
+        headers.insert(header::CONTENT_LENGTH, HeaderValue::from_static("123"));
+
+        let forwarded = forwarded_response_headers(&headers);
+        assert!(forwarded.get("x-request-id").is_some(), "普通响应头应保留");
+        assert!(
+            forwarded.get("x-upstream-hop").is_none(),
+            "上游 Connection 指定字段不得透传"
+        );
+        assert!(forwarded.get(header::CONTENT_LENGTH).is_none());
+        assert!(forwarded.get(header::CONNECTION).is_none());
+    }
+
+    /// 首块之后永远 Pending 的上游流；被 drop 时置位，用来证明取消及时发生。
+    struct PendingStream {
+        first: Option<Bytes>,
+        dropped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl Stream for PendingStream {
+        type Item = Result<Bytes, std::io::Error>;
+
+        fn poll_next(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Self::Item>> {
+            match self.first.take() {
+                Some(chunk) => std::task::Poll::Ready(Some(Ok(chunk))),
+                None => std::task::Poll::Pending,
+            }
+        }
+    }
+
+    impl Drop for PendingStream {
+        fn drop(&mut self) {
+            self.dropped
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn sse_client_disconnect_cancels_upstream_without_waiting_for_next_chunk() {
+        use std::sync::atomic::Ordering;
+        use std::sync::Arc;
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(4);
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stream = PendingStream {
+            first: Some(Bytes::from_static(
+                b"data: {\"type\":\"message_delta\"}\n\n",
+            )),
+            dropped: dropped.clone(),
+        };
+
+        let task = tokio::spawn(async move {
+            let mut parser = sse::Parser::default();
+            assert!(!forward_sse(stream, &tx, &mut parser).await);
+        });
+
+        let first = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("应转发首块")
+            .expect("channel 不应关闭");
+        assert!(first.is_ok());
+        assert!(
+            !dropped.load(Ordering::SeqCst),
+            "客户端仍连接时不应提前 drop 上游"
+        );
+
+        drop(rx);
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("客户端断开后转发任务应立即结束，而不是等上游下一个 chunk")
+            .expect("任务不应 panic");
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "客户端断开后必须 drop 上游流/response"
+        );
+    }
+
+    #[test]
+    fn log_line_rotates_at_runtime_and_keeps_backup() {
+        let dir = std::env::temp_dir().join(format!(
+            "ccms-router-log-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("router.log");
+        let max = 70;
+
+        log_line_with_limit(&path, "first-line-marker", max).unwrap();
+        log_line_with_limit(&path, "second-line-marker", max).unwrap();
+
+        let backup = path.with_extension("log.1");
+        let old = fs::read_to_string(&backup).expect("轮转必须留下 .log.1 备份");
+        let current = fs::read_to_string(&path).unwrap();
+        assert!(old.contains("first-line-marker"), "备份内容：{old:?}");
+        assert!(!old.contains("second-line-marker"), "备份内容：{old:?}");
+        assert!(
+            current.contains("second-line-marker"),
+            "当前内容：{current:?}"
+        );
+        assert!(
+            !current.contains("first-line-marker"),
+            "当前内容：{current:?}"
+        );
+
+        for index in 0..50 {
+            log_line_with_limit(&path, &format!("later-{index}-{}", "x".repeat(20)), max).unwrap();
+        }
+        assert!(
+            fs::metadata(&path).unwrap().len() <= max,
+            "长期运行也必须受大小上限约束"
+        );
+        assert!(fs::metadata(&backup).unwrap().len() <= max);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn keys_cache_retries_after_load_failure_without_stamp_change() {
+        let home =
+            std::env::temp_dir().join(format!("ccms-keys-cache-retry-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).unwrap();
+        let paths = Paths {
+            routes: home.join("routes.json"),
+            providers: home.join("providers.json"),
+            keys_env: home.join("keys.env"),
+            keys_enc: home.join("keys.enc"),
+            keyfile: home.join("keystore.key"),
+            lock: home.join("keystore.lock"),
+            rekey_journal: home.join("keystore.rekey.journal"),
+            rekey_enc_backup: home.join("keys.enc.rekey.bak"),
+            rekey_key_backup: home.join("keystore.key.rekey.bak"),
+            stats: home.join("stats.json"),
+            log: home.join("router.log"),
+            pid: home.join("router.pid"),
+            router_token: home.join("router.token"),
+            settings: home.join("settings.json"),
+            settings_previous: home.join("settings.previous.json"),
+            home: home.clone(),
+        };
+        let vault = Vault::new(&paths);
+        vault
+            .update_with(|map| {
+                map.insert("KIMI_API_KEYS".into(), "sk-retry".into());
+                Ok(())
+            })
+            .unwrap();
+        let enc_stamp = stamp(&vault.enc);
+        let key_stamp = stamp(&vault.keyfile);
+
+        // 损坏的 rekey journal 让 load 失败，但 keys.enc / keystore.key 完全不变。
+        fs::write(&paths.rekey_journal, "{not-json").unwrap();
+        let mut cache = KeysCache::empty();
+        cache.ensure(&vault, &paths.log);
+        assert!(!cache.loaded, "load 失败后不得标记 loaded");
+        assert!(cache.map.is_empty(), "失败请求必须以空 key 池 fail closed");
+        assert!(vault.load().is_err(), "事务日志仍损坏时 load 必须继续失败");
+
+        // 完成事务日志后，不改动 key 库文件、不重启、不改配置。
+        fs::write(
+            &paths.rekey_journal,
+            r#"{"state":"committed","had_enc":false,"had_keyfile":false}"#,
+        )
+        .unwrap();
+        assert_eq!(stamp(&vault.enc), enc_stamp);
+        assert_eq!(stamp(&vault.keyfile), key_stamp);
+        cache.ensure(&vault, &paths.log);
+        assert!(cache.loaded, "第二次 load 成功后必须标记 loaded");
+        assert_eq!(
+            cache.map.get("KIMI_API_KEYS").map(String::as_str),
+            Some("sk-retry"),
+            "失败后下一次请求必须重试并拿到密钥"
+        );
+        let _ = fs::remove_dir_all(&home);
     }
 }

@@ -1,15 +1,34 @@
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
+use std::collections::BTreeMap;
 
 use crate::config;
 use crate::keystore::{self, Vault};
 use crate::paths::Paths;
 use crate::term::Style;
 
+/// 在锁内重写池变量；只有一把 key 时也统一写池变量，并清掉单 key 变量。
+fn write_pool(
+    map: &mut BTreeMap<String, String>,
+    pool_var: &str,
+    single_var: Option<&str>,
+    list: &[String],
+) {
+    if list.is_empty() {
+        map.remove(pool_var);
+    } else {
+        map.insert(pool_var.to_string(), list.join(","));
+    }
+    if let Some(single) = single_var {
+        map.remove(single);
+    }
+}
+
 pub fn run(
     paths: &Paths,
     provider_name: &str,
     action: Option<&str>,
     value: Option<&str>,
+    stdin: bool,
 ) -> Result<()> {
     config::ensure_defaults(paths)?;
     let style = Style::detect();
@@ -21,32 +40,51 @@ pub fn run(
         .ok_or_else(|| anyhow!("{provider_name} 未配置 key_env，无法定位密钥池变量"))?;
     let single_var = provider.key_env.clone();
     let vault = Vault::new(paths);
-    let env = vault.load_or_empty();
-    let existing = keystore::keys_for(&env, provider);
 
-    let write_pool = |list: &[String]| -> Result<()> {
-        let joined = list.join(",");
-        let pool_var = pool_var.clone();
-        let single_var = single_var.clone();
-        vault.update(move |map| {
-            if joined.is_empty() {
-                map.remove(&pool_var);
-            } else {
-                map.insert(pool_var.clone(), joined);
+    if stdin {
+        if matches!(action, Some("list" | "clear" | "remove")) {
+            bail!("--stdin 只能用于新增 key");
+        }
+        let keys = read_stdin_keys()?;
+        // 读取与写回在同一把文件锁内完成，避免并发新增互相覆盖。
+        let (added, total) = vault.update_with(|map| {
+            let mut list = keystore::keys_for(map, provider);
+            let mut added = Vec::new();
+            for key in keys {
+                if !list.iter().any(|current| current == &key) {
+                    list.push(key.clone());
+                    added.push(key);
+                }
             }
-            if let Some(single) = single_var {
-                map.remove(&single);
+            if !added.is_empty() {
+                write_pool(map, &pool_var, single_var.as_deref(), &list);
             }
-        })
-    };
+            Ok((added, list.len()))
+        })?;
+        if added.is_empty() {
+            println!("{}", style.warn("这些 key 已在池中"));
+            return Ok(());
+        }
+        let masks: Vec<String> = added.iter().map(|key| super::mask(key)).collect();
+        println!(
+            "{}",
+            style.ok(&format!(
+                "{provider_name} 密钥池 {total} 把（新增 {}: {}）",
+                added.len(),
+                masks.join(", ")
+            ))
+        );
+        return Ok(());
+    }
 
     match action {
         None | Some("list") => {
+            let existing = keystore::keys_for(&vault.load()?, provider);
             if existing.is_empty() {
                 println!("{}", style.warn(&format!("{provider_name} 的密钥池为空")));
                 println!(
                     "{}",
-                    style.dim(&format!("添加: ccms key {provider_name} sk-xxx"))
+                    style.dim(&format!("添加: ccms --key {provider_name} sk-xxx"))
                 );
             } else {
                 for (index, key) in existing.iter().enumerate() {
@@ -60,30 +98,37 @@ pub fn run(
             Ok(())
         }
         Some("clear") => {
-            write_pool(&[])?;
+            vault.update_with(|map| {
+                write_pool(map, &pool_var, single_var.as_deref(), &[]);
+                Ok(())
+            })?;
             println!("{}", style.ok(&format!("已清空 {provider_name} 的密钥池")));
             Ok(())
         }
         Some("remove") => {
             let index: usize = value
-                .ok_or_else(|| anyhow!("用法: ccms key {provider_name} remove <序号>"))?
+                .ok_or_else(|| anyhow!("用法: ccms --key/-k {provider_name} remove <序号>"))?
                 .parse()
                 .map_err(|_| anyhow!("序号必须是数字"))?;
-            if index == 0 || index > existing.len() {
-                bail!("序号超出范围（1..={}）", existing.len());
-            }
-            let mut list = existing.clone();
-            list.remove(index - 1);
-            write_pool(&list)?;
+            let remaining = vault.update_with(|map| -> Result<usize> {
+                let mut list = keystore::keys_for(map, provider);
+                if index == 0 || index > list.len() {
+                    bail!("序号超出范围（1..={}）", list.len());
+                }
+                list.remove(index - 1);
+                let remaining = list.len();
+                write_pool(map, &pool_var, single_var.as_deref(), &list);
+                Ok(remaining)
+            })?;
             println!(
                 "{}",
-                style.ok(&format!("已移除第 {index} 把，剩余 {} 把", list.len()))
+                style.ok(&format!("已移除第 {index} 把，剩余 {remaining} 把"))
             );
             Ok(())
         }
         Some(other) => {
             let key = if other == "add" {
-                value.ok_or_else(|| anyhow!("用法: ccms key {provider_name} add <sk-...>"))?
+                value.ok_or_else(|| anyhow!("用法: ccms --key/-k {provider_name} add <sk-...>"))?
             } else {
                 other
             };
@@ -91,22 +136,46 @@ pub fn run(
             if key.is_empty() {
                 bail!("key 不能为空");
             }
-            if existing.iter().any(|current| current == key) {
+            let (added, total) = vault.update_with(|map| {
+                let mut list = keystore::keys_for(map, provider);
+                if list.iter().any(|current| current == key) {
+                    return Ok((false, list.len()));
+                }
+                list.push(key.to_string());
+                let total = list.len();
+                write_pool(map, &pool_var, single_var.as_deref(), &list);
+                Ok((true, total))
+            })?;
+            if !added {
                 println!("{}", style.warn("该 key 已在池中"));
                 return Ok(());
             }
-            let mut list = existing.clone();
-            list.push(key.to_string());
-            write_pool(&list)?;
             println!(
                 "{}",
                 style.ok(&format!(
-                    "{provider_name} 密钥池 {} 把（新增 {}）",
-                    list.len(),
+                    "{provider_name} 密钥池 {total} 把（新增 {}）",
                     super::mask(key)
                 ))
             );
             Ok(())
         }
     }
+}
+
+fn read_stdin_keys() -> Result<Vec<String>> {
+    use std::io::Read;
+    let mut text = String::new();
+    std::io::stdin()
+        .read_to_string(&mut text)
+        .context("读取 stdin 失败")?;
+    let keys: Vec<String> = text
+        .split(|c: char| c.is_whitespace() || c == ',')
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map(str::to_string)
+        .collect();
+    if keys.is_empty() {
+        bail!("stdin 为空：请通过管道传入至少一把 key");
+    }
+    Ok(keys)
 }

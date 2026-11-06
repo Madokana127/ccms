@@ -72,6 +72,7 @@ $env:Path = "$Prefix;$env:Path"
 
 Write-Host '== 初始化配置 =='
 & $exe init
+if ($LASTEXITCODE -ne 0) { Fail 'ccms init 失败' }
 
 Write-Host ''
 Ok '安装完成'

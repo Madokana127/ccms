@@ -23,7 +23,7 @@ pub async fn run(paths: &Paths) -> Result<()> {
                 "Router (stopped)".to_string()
             }
         }
-        Some(_) => "Claude (direct)".to_string(),
+        Some(_) => "Claude (legacy direct)".to_string(),
         None => "Claude".to_string(),
     };
 
@@ -35,7 +35,25 @@ pub async fn run(paths: &Paths) -> Result<()> {
         routes.effort
     );
     println!("{}", style.bold("Route List"));
-    super::print_routes(&routes, &style);
+    // main 的首页布局：五档固定顺序、箭头 ->、标签左对齐 8 列。
+    for (label, tier) in [
+        ("Fable", "fable"),
+        ("Opus", "opus"),
+        ("Sonnet", "sonnet"),
+        ("Haiku", "haiku"),
+        ("subagent", "subagent"),
+    ] {
+        let (provider, model) = routes
+            .routes
+            .get(tier)
+            .map(|route| (route.provider.as_str(), route.model.as_str()))
+            .unwrap_or(("-", "-"));
+        println!(
+            "    {}-> {}",
+            style.tier(&format!("{label:<8}")),
+            style.cyan(&format!("{provider}/{model}"))
+        );
+    }
 
     println!("{}", style.bold("API Key"));
     let vault = Vault::new(paths);
@@ -52,6 +70,7 @@ pub async fn run(paths: &Paths) -> Result<()> {
         }
         Err(err) => println!("    {} 密钥库不可用: {err:#}", style.yellow("!")),
     }
+    println!("{}", style.dim("提示  ccms --help/-h"));
 
     Ok(())
 }

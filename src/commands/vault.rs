@@ -17,7 +17,7 @@ pub async fn run(paths: &Paths, cmd: VaultCmd) -> Result<()> {
             println!("{}", style.section("密钥库"));
             if !status.encrypted {
                 println!("  存储方式    明文 keys.env（未启用加密）");
-                println!("  {}", style.warn("建议执行 ccms vault seal"));
+                println!("  {}", style.warn("建议执行 ccms --vault --seal"));
                 return Ok(());
             }
             println!(
