@@ -1,0 +1,58 @@
+# Alkanet 配置文件（支持热加载，改完保存立即生效）
+listen = "127.0.0.1:8788"
+default = "sonnet"
+effort = "high"
+
+[retry]
+attempts = 3
+backoff_ms = 400
+response_timeout_ms = 120000
+connect_timeout_ms = 15000
+retry_on = [401, 403, 408, 429, 500, 502, 503, 504]
+
+[routes.fable]
+provider = "kimi"
+model = "kimi-k3.1-pro"
+
+[routes.opus]
+provider = "kimi"
+model = "kimi-k3.1-pro"
+
+[routes.sonnet]
+provider = "qwen"
+model = "qwen3-coder-plus"
+
+[routes.haiku]
+provider = "deepseek"
+model = "deepseek-flash"
+
+[routes.subagent]
+provider = "deepseek"
+model = "deepseek-flash"
+
+[providers.deepseek]
+label = "DeepSeek"
+base_url = "https://api.deepseek.com/anthropic"
+key_env = "DEEPSEEK_API_KEY"
+default_model = "deepseek-v4-pro"
+models = ["deepseek-v4-pro", "deepseek-flash"]
+auth = "bearer"
+note = "官方 Anthropic 兼容端点"
+
+[providers.kimi]
+label = "Kimi (Moonshot)"
+base_url = "https://api.moonshot.cn/anthropic"
+key_env = "KIMI_API_KEY"
+default_model = "kimi-k3.1-pro"
+models = ["kimi-k3.1-pro", "kimi-k3.1-pro-highspeed", "kimi-k3"]
+auth = "bearer"
+note = "可用 ID 以 aknt models kimi 为准"
+
+[providers.qwen]
+label = "千问 MaaS"
+base_url = "https://maas.qianwenaiapi.com/apps/anthropic"
+key_env = "QWEN_API_KEY"
+default_model = "qwen3-coder-plus"
+models = ["qwen3-coder-plus"]
+auth = "bearer"
+note = "阿里云百炼 MaaS 网关"

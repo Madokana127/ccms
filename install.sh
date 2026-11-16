@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# CCMS 一键安装：Linux / macOS / WSL。
+# Alkanet 一键安装：Linux / macOS / WSL。
 # Windows 原生环境（git-bash / MSYS）会自动转交 install.ps1。
 set -euo pipefail
 
@@ -15,12 +15,12 @@ usage() {
 
   --prefix DIR   安装到 DIR/bin（默认 ~/.local）
   --no-path      不修改 shell 启动文件
-  --uninstall    删除已安装的 ccms（配置目录保留）
+  --uninstall    删除已安装的 aknt 与 alkanetd（配置目录保留）
   -h, --help     显示帮助
 
 环境变量:
   PREFIX         等同 --prefix
-  CCMS_PROXY     上游代理（默认直连，不读系统 http_proxy）
+  ALKANET_PROXY  上游代理（默认直连，不读系统 http_proxy）
 EOF
 }
 
@@ -39,9 +39,6 @@ while [[ $# -gt 0 ]]; do
 done
 
 OS="$(uname -s)"
-
-# Windows 的 bash 没有 /usr/local 语义，权限模型也不同，
-# 统一交给 install.ps1（同一个仓库，逻辑只有一份）。
 case "$OS" in
   MINGW*|MSYS*|CYGWIN*)
     command -v powershell.exe >/dev/null 2>&1 || die "找不到 powershell.exe"
@@ -56,31 +53,36 @@ case "$OS" in
   *) die "不支持的平台: $OS（Linux / macOS / Windows 的 git-bash）" ;;
 esac
 
-command -v cargo >/dev/null 2>&1 || die "需要 Rust 工具链，先安装：https://rustup.rs"
 BIN_DIR="$PREFIX/bin"
-BIN="$BIN_DIR/ccms"
+CLI_BIN="$BIN_DIR/aknt"
+DAEMON_BIN="$BIN_DIR/alkanetd"
 
 if [[ $UNINSTALL -eq 1 ]]; then
-  rm -f "$BIN"
-  ok "已删除 $BIN（配置目录 ~/.config/ccms 保留）"
+  rm -f "$CLI_BIN" "$DAEMON_BIN"
+  ok "已删除 $CLI_BIN 与 $DAEMON_BIN（配置目录 ~/.config/alkanet 保留）"
   exit 0
 fi
 
-printf '== 构建 ==\n'
+command -v cargo >/dev/null 2>&1 || die "需要 Rust 工具链，先安装：https://rustup.rs"
+command -v go >/dev/null 2>&1 || die "需要 Go 1.22+ 工具链，先安装：https://go.dev/dl/"
+
+printf '== 构建 alkanetd (Rust) + aknt (Go) ==\n'
 cd "$ROOT"
 if [[ -f Cargo.lock ]]; then
-  cargo build --release --locked
+  cargo build --release --locked --bin alkanetd
 else
-  cargo build --release
+  cargo build --release --bin alkanetd
 fi
+go build -trimpath -ldflags="-s -w" -o "target/release/aknt" ./cmd/aknt
 
 mkdir -p "$BIN_DIR"
-cp -f "target/release/ccms" "$BIN"
-chmod 755 "$BIN"
-ok "已安装 $BIN"
+cp -f "target/release/alkanetd" "$DAEMON_BIN"
+cp -f "target/release/aknt" "$CLI_BIN"
+chmod 755 "$DAEMON_BIN" "$CLI_BIN"
+ok "已安装 $CLI_BIN 与 $DAEMON_BIN"
 
 printf '== 初始化配置 ==\n'
-"$BIN" --init
+"$CLI_BIN" config path >/dev/null
 
 PATH_RC=""
 case "$(basename "${SHELL:-bash}")" in
@@ -97,13 +99,13 @@ esac
 if [[ $ADD_PATH -eq 1 && $ON_PATH -eq 0 ]]; then
   mkdir -p "$(dirname "$PATH_RC")"
   touch "$PATH_RC"
-  if grep -qF '# >>> ccms >>>' "$PATH_RC"; then
-    ok "$PATH_RC 里已有 ccms 的 PATH 配置"
+  if grep -qF '# >>> alkanet >>>' "$PATH_RC"; then
+    ok "$PATH_RC 里已有 alkanet 的 PATH 配置"
   elif [[ "$PATH_RC" == *config.fish ]]; then
-    printf '\n# >>> ccms >>>\nfish_add_path %s\n# <<< ccms <<<\n' "$BIN_DIR" >> "$PATH_RC"
+    printf '\n# >>> alkanet >>>\nfish_add_path %s\n# <<< alkanet <<<\n' "$BIN_DIR" >> "$PATH_RC"
     ok "已把 $BIN_DIR 写入 $PATH_RC（重开 shell 生效）"
   else
-    printf '\n# >>> ccms >>>\nexport PATH="%s:$PATH"\n# <<< ccms <<<\n' "$BIN_DIR" >> "$PATH_RC"
+    printf '\n# >>> alkanet >>>\nexport PATH="%s:$PATH"\n# <<< alkanet <<<\n' "$BIN_DIR" >> "$PATH_RC"
     ok "已把 $BIN_DIR 写入 $PATH_RC（重开 shell 或 source 后生效）"
   fi
 elif [[ $ON_PATH -eq 1 ]]; then
@@ -112,10 +114,5 @@ fi
 
 printf '\n'
 ok "安装完成"
-FOUND="$(command -v ccms 2>/dev/null || true)"
-if [[ -n "$FOUND" && "$FOUND" != "$BIN" ]]; then
-  printf '! PATH 里还有另一个 ccms: %s\n' "$FOUND"
-  printf '  若那是 0.1 的 Node 版，建议删除它或把它从 PATH 移走\n'
-fi
-printf '下一步: ccms --key <provider> sk-...  →  ccms --on  →  新开一个 claude\n'
-printf '验证:   ccms --doctor && ./scripts/validate.sh\n'
+printf '下一步: aknt key add <provider> --stdin  →  aknt on  →  新开一个 claude\n'
+printf '验证:   aknt status --check && ./scripts/validate.sh\n'

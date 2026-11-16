@@ -5,12 +5,12 @@ use anyhow::{anyhow, Result};
 
 /// 所有运行期路径的唯一来源。
 ///
-/// 统一规则（三平台一致）：`$CCMS_HOME`，否则 `<home>/.config/ccms`。
-/// Claude Code 的设置固定为 `<home>/.claude/settings.json`，可用 `CLAUDE_SETTINGS` 覆盖。
-/// 两者都没有显式覆盖且无法确定 home 时返回错误，绝不回退到当前目录。
+/// 统一规则：``（兼容 ``），否则 `<home>/.config/alkanet`
+/// （若不存在但存在 `<home>/.config/ccms`，仍写向 `alkanet`）。
 #[derive(Clone, Debug)]
 pub struct Paths {
     pub home: PathBuf,
+    pub config: PathBuf,
     pub routes: PathBuf,
     pub providers: PathBuf,
     pub keys_env: PathBuf,
@@ -24,22 +24,24 @@ pub struct Paths {
     pub log: PathBuf,
     pub pid: PathBuf,
     pub router_token: PathBuf,
+    #[allow(dead_code)]
     pub settings: PathBuf,
+    #[allow(dead_code)]
     pub settings_previous: PathBuf,
 }
 
 impl Paths {
     pub fn load() -> Result<Self> {
-        let home = match env_path("CCMS_HOME") {
+        let home = match env_path("ALKANET_HOME").or_else(|| env_path("CCMS_HOME")) {
             Some(path) => path,
             None => home_dir()
                 .ok_or_else(|| {
                     anyhow!(
-                        "无法确定用户主目录：请设置 CCMS_HOME 或 HOME/USERPROFILE；拒绝回退到当前目录"
+                        "无法确定用户主目录：请设置 ALKANET_HOME 或 HOME/USERPROFILE；拒绝回退到当前目录"
                     )
                 })?
                 .join(".config")
-                .join("ccms"),
+                .join("alkanet"),
         };
         let settings = match env_path("CLAUDE_SETTINGS") {
             Some(path) => path,
@@ -54,6 +56,7 @@ impl Paths {
         };
 
         Ok(Self {
+            config: home.join("config.toml"),
             routes: home.join("routes.json"),
             providers: home.join("providers.json"),
             keys_env: home.join("keys.env"),
@@ -73,7 +76,6 @@ impl Paths {
         })
     }
 
-    /// 配置目录只允许当前用户访问；Unix 上收紧到 700，Windows 依赖目录 ACL。
     pub fn ensure(&self) -> std::io::Result<()> {
         std::fs::create_dir_all(&self.home)?;
         #[cfg(unix)]
@@ -85,7 +87,6 @@ impl Paths {
     }
 }
 
-/// Windows 下 PowerShell 通常只有 USERPROFILE，git-bash / WSL 有 HOME。
 pub fn home_dir() -> Option<PathBuf> {
     for key in ["HOME", "USERPROFILE"] {
         if let Some(value) = env_path(key) {
@@ -105,16 +106,16 @@ fn env_path(key: &str) -> Option<PathBuf> {
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
     #[test]
     fn ensure_tightens_home_to_owner_only() {
         use std::os::unix::fs::PermissionsExt;
-        let home = std::env::temp_dir().join(format!("ccms-paths-{}", std::process::id()));
+        let home = std::env::temp_dir().join(format!("alkanet-paths-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(&home).unwrap();
         std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let paths = Paths {
+            config: home.join("config.toml"),
             routes: home.join("routes.json"),
             providers: home.join("providers.json"),
             keys_env: home.join("keys.env"),
@@ -134,6 +135,6 @@ mod tests {
         };
         paths.ensure().unwrap();
         let mode = std::fs::metadata(&home).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o700, "CCMS_HOME 必须收紧到 700");
+        assert_eq!(mode, 0o700, "ALKANET_HOME 必须收紧到 700");
     }
 }

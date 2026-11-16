@@ -109,9 +109,14 @@ impl Vault {
     }
 
     fn passphrase() -> Option<String> {
-        env::var("CCMS_KEYSTORE_PASSPHRASE")
+        env::var("ALKANET_KEYSTORE_PASSPHRASE")
             .ok()
             .filter(|v| !v.is_empty())
+            .or_else(|| {
+                env::var("CCMS_KEYSTORE_PASSPHRASE")
+                    .ok()
+                    .filter(|v| !v.is_empty())
+            })
     }
 
     fn read_meta(&self) -> Result<Meta> {
@@ -754,6 +759,7 @@ fn neutralize_legacy(path: &Path) -> Result<()> {
     fsutil::write_atomic(path, body.as_bytes(), 0o600)
 }
 
+#[allow(dead_code)]
 pub fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
@@ -824,6 +830,7 @@ mod tests {
         let _ = fs::remove_dir_all(&home);
         fs::create_dir_all(&home).unwrap();
         Paths {
+            config: home.join("config.toml"),
             routes: home.join("routes.json"),
             providers: home.join("providers.json"),
             keys_env: home.join("keys.env"),
@@ -907,6 +914,7 @@ mod tests {
         let _guard = guard();
         let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/js-vault");
         let paths = Paths {
+            config: fixture.join("config.toml"),
             routes: fixture.join("routes.json"),
             providers: fixture.join("providers.json"),
             keys_env: fixture.join("keys.env"),

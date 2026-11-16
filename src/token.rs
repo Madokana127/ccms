@@ -129,6 +129,7 @@ mod tests {
 
     fn paths_in(home: std::path::PathBuf) -> Paths {
         Paths {
+            config: home.join("config.toml"),
             routes: home.join("routes.json"),
             providers: home.join("providers.json"),
             keys_env: home.join("keys.env"),

@@ -11,7 +11,7 @@ use axum::routing::post;
 use axum::{Json, Router};
 use serde_json::{json, Value};
 
-const BIN: &str = env!("CARGO_BIN_EXE_ccms");
+const BIN: &str = env!("CARGO_BIN_EXE_alkanetd");
 
 struct Guard(Child);
 
@@ -107,7 +107,7 @@ async fn wait_health(port: u16) {
         .expect("client");
     for _ in 0..120 {
         if let Ok(response) = client
-            .get(format!("http://127.0.0.1:{port}/ccms/health"))
+            .get(format!("http://127.0.0.1:{port}/alkanet/health"))
             .send()
             .await
         {
@@ -168,24 +168,24 @@ async fn end_to_end_router() {
 
     // 两把 key：第一把会被上游拒绝，验证换 key + 重试。
     let status = Command::new(BIN)
-        .args(["--key", "kimi", "sk-bad"])
-        .env("CCMS_HOME", &home)
+        .args(["vault", "add", "kimi", "sk-bad"])
+        .env("ALKANET_HOME", &home)
         .stdout(Stdio::null())
         .status()
         .expect("run key");
     assert!(status.success());
 
     let status = Command::new(BIN)
-        .args(["--key", "kimi", "sk-good"])
-        .env("CCMS_HOME", &home)
+        .args(["vault", "add", "kimi", "sk-good"])
+        .env("ALKANET_HOME", &home)
         .stdout(Stdio::null())
         .status()
         .expect("run key");
     assert!(status.success());
 
     let child = Command::new(BIN)
-        .args(["--router", "--run"])
-        .env("CCMS_HOME", &home)
+        .args(["run"])
+        .env("ALKANET_HOME", &home)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -200,7 +200,7 @@ async fn end_to_end_router() {
         .timeout(Duration::from_secs(2))
         .build()
         .expect("health client")
-        .get(format!("http://127.0.0.1:{router_port}/ccms/health"))
+        .get(format!("http://127.0.0.1:{router_port}/alkanet/health"))
         .send()
         .await
         .expect("health request")
@@ -214,8 +214,8 @@ async fn end_to_end_router() {
     );
 
     let second = Command::new(BIN)
-        .args(["--router", "--run"])
-        .env("CCMS_HOME", &home)
+        .args(["run"])
+        .env("ALKANET_HOME", &home)
         .output()
         .expect("second router run");
     assert!(
@@ -262,7 +262,7 @@ async fn end_to_end_router() {
     let unauthorized = client
         .post(format!("{base}/v1/messages"))
         .header("x-api-key", "ccms-router-local")
-        .json(&json!({"model": "ccms-sonnet", "messages": []}))
+        .json(&json!({"model": "alkanet-sonnet", "messages": []}))
         .send()
         .await
         .expect("proxy fixed token");
@@ -293,7 +293,7 @@ async fn end_to_end_router() {
         .post(format!("{base}/v1/messages"))
         .header("x-api-key", &token)
         .json(&json!({
-            "model": "ccms-opus",
+            "model": "alkanet-opus",
             "max_tokens": 16,
             "messages": [{"role": "user", "content": "hi"}]
         }))
@@ -329,7 +329,7 @@ async fn end_to_end_router() {
     let echoed: Value = client
         .post(format!("{base}/v1/messages"))
         .header("x-api-key", &token)
-        .json(&json!({"model": "ccms-sonnet", "messages": []}))
+        .json(&json!({"model": "alkanet-sonnet", "messages": []}))
         .send()
         .await
         .expect("post")
@@ -342,7 +342,7 @@ async fn end_to_end_router() {
     let streamed = client
         .post(format!("{base}/v1/messages"))
         .header("x-api-key", &token)
-        .json(&json!({"model": "ccms-sonnet", "stream": true, "messages": []}))
+        .json(&json!({"model": "alkanet-sonnet", "stream": true, "messages": []}))
         .send()
         .await
         .expect("post")
@@ -355,7 +355,7 @@ async fn end_to_end_router() {
     let counted: Value = client
         .post(format!("{base}/v1/messages/count_tokens"))
         .header("x-api-key", &token)
-        .json(&json!({"model": "ccms-haiku", "messages": [{"role":"user","content":"hello"}]}))
+        .json(&json!({"model": "alkanet-haiku", "messages": [{"role":"user","content":"hello"}]}))
         .send()
         .await
         .expect("post")
@@ -380,8 +380,8 @@ async fn end_to_end_router() {
         .iter()
         .map(|item| item["id"].as_str().unwrap_or(""))
         .collect();
-    assert!(ids.contains(&"ccms-opus"));
-    assert!(ids.contains(&"ccms-subagent"));
+    assert!(ids.contains(&"alkanet-opus"));
+    assert!(ids.contains(&"alkanet-subagent"));
 
     // 7) 统计按 provider/model 记账，且记录了重试
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -416,94 +416,4 @@ async fn end_to_end_router() {
         "router.log 不得出现 token 明文:\n{log}"
     );
     assert!(log.contains("401 POST /v1/messages 未授权"), "应记录拒绝");
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn test_router_waits_past_local_health_timeout() {
-    let home = std::env::temp_dir().join(format!("ccms-e2e-test-router-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&home);
-    std::fs::create_dir_all(&home).expect("mkdir");
-
-    let upstream_port = free_port();
-    let router_port = free_port();
-
-    // 只延迟 `say ok`（--test router 的固定探测请求），其余请求立即返回。
-    tokio::spawn(mock_upstream(upstream_port, Duration::from_millis(2000)));
-    tokio::time::sleep(Duration::from_millis(300)).await;
-
-    std::fs::write(
-        home.join("providers.json"),
-        json!({
-            "kimi": {
-                "label": "Mock",
-                "base_url": format!("http://127.0.0.1:{upstream_port}"),
-                "key_env": "KIMI_API_KEY",
-                "default_model": "mock-model",
-                "models": ["mock-model"]
-            }
-        })
-        .to_string(),
-    )
-    .expect("providers");
-
-    std::fs::write(
-        home.join("routes.json"),
-        json!({
-            "listen": format!("127.0.0.1:{router_port}"),
-            "default": "sonnet",
-            "effort": "high",
-            "retry": { "attempts": 3, "backoff_ms": 10, "response_timeout_ms": 5000, "connect_timeout_ms": 2000, "retry_on": [401, 429, 500, 502, 503, 504] },
-            "routes": {
-                "opus": { "provider": "kimi", "model": "mock-model" },
-                "sonnet": { "provider": "kimi", "model": "mock-model" },
-                "haiku": { "provider": "kimi", "model": "mock-model" },
-                "fable": { "provider": "kimi", "model": "mock-model" },
-                "subagent": { "provider": "kimi", "model": "mock-model" }
-            }
-        })
-        .to_string(),
-    )
-    .expect("routes");
-
-    let status = Command::new(BIN)
-        .args(["--key", "kimi", "sk-test"])
-        .env("CCMS_HOME", &home)
-        .stdout(Stdio::null())
-        .status()
-        .expect("run key");
-    assert!(status.success());
-
-    let child = Command::new(BIN)
-        .args(["--router", "--run"])
-        .env("CCMS_HOME", &home)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn router");
-    let _guard = Guard(child);
-    wait_health(router_port).await;
-
-    let started = std::time::Instant::now();
-    let output = Command::new(BIN)
-        .args(["--test", "router"])
-        .env("CCMS_HOME", &home)
-        .env("CLAUDE_SETTINGS", home.join("settings.json"))
-        .output()
-        .expect("run test router");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-
-    assert!(
-        output.status.success(),
-        "--test router 应等待 2s 慢上游成功（旧实现 1500ms 必超时）：\nstdout={stdout}\nstderr={stderr}"
-    );
-    assert!(stdout.contains("HTTP 200"), "应打印上游状态：{stdout}");
-    assert!(
-        stdout.contains("路由链路可用"),
-        "应报告路由链路可用：{stdout}"
-    );
-    assert!(
-        started.elapsed() >= Duration::from_millis(1800),
-        "mock 的 2s 延迟应被实际触发"
-    );
 }

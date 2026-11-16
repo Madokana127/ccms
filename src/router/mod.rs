@@ -44,7 +44,7 @@ const LOG_MAX_BYTES: u64 = 5 * 1024 * 1024;
 
 pub fn log_line(path: &Path, line: &str) {
     if let Err(err) = log_line_with_limit(path, line, LOG_MAX_BYTES) {
-        eprintln!("ccms: 写日志 {} 失败: {err:#}", path.display());
+        eprintln!("alkanet: 写日志 {} 失败: {err:#}", path.display());
     }
 }
 
@@ -92,25 +92,47 @@ fn log_line_with_limit(path: &Path, line: &str, max_bytes: u64) -> Result<()> {
     Ok(())
 }
 
-/// 路由与 provider 按 mtime 热加载：改完配置无需重启 router。
+/// 路由与 provider 按 mtime 热加载：优先 config.toml，兼容 routes.json + providers.json。
 struct ConfigCache {
     routes: Arc<RoutesConfig>,
     providers: Arc<Providers>,
+    config_stamp: Stamp,
     routes_stamp: Stamp,
     providers_stamp: Stamp,
 }
 
 impl ConfigCache {
     fn load(paths: &Paths) -> Result<Self> {
+        let (routes, providers) = config::load_effective(paths)?;
         Ok(Self {
-            routes: Arc::new(config::load_routes(&paths.routes)?),
-            providers: Arc::new(config::load_providers(&paths.providers)?),
+            routes: Arc::new(routes),
+            providers: Arc::new(providers),
+            config_stamp: stamp(&paths.config),
             routes_stamp: stamp(&paths.routes),
             providers_stamp: stamp(&paths.providers),
         })
     }
 
     fn refresh(&mut self, paths: &Paths) -> (Arc<RoutesConfig>, Arc<Providers>) {
+        let config_stamp = stamp(&paths.config);
+        if paths.config.is_file() {
+            if config_stamp != self.config_stamp {
+                match config::load_effective(paths) {
+                    Ok((routes, providers)) => {
+                        self.routes = Arc::new(routes);
+                        self.providers = Arc::new(providers);
+                        self.config_stamp = config_stamp;
+                        log_line(&paths.log, "配置热加载: config.toml");
+                    }
+                    Err(err) => log_line(
+                        &paths.log,
+                        &format!("config.toml 解析失败，继续使用旧配置: {err:#}"),
+                    ),
+                }
+            }
+            return (self.routes.clone(), self.providers.clone());
+        }
+
         let routes_stamp = stamp(&paths.routes);
         if routes_stamp != self.routes_stamp {
             match config::load_routes(&paths.routes) {
@@ -287,7 +309,7 @@ impl AppState {
 
 pub async fn run(paths: Paths) -> Result<()> {
     config::ensure_defaults(&paths)?;
-    let cfg = config::load_routes(&paths.routes)?;
+    let (cfg, _) = config::load_effective(&paths)?;
     let listen = cfg.listen.clone();
     let addr: SocketAddr = listen
         .parse()
@@ -306,7 +328,7 @@ pub async fn run(paths: Paths) -> Result<()> {
     let vault = Vault::new(&paths);
     if !vault.exists() {
         match vault.migrate_legacy() {
-            Ok(Some(count)) => println!("ccms: 已将 {count} 个明文密钥迁移进 keys.enc"),
+            Ok(Some(count)) => println!("alkanet: 已将 {count} 个明文密钥迁移进 keys.enc"),
             Ok(None) => {}
             Err(err) => return Err(err).context("明文密钥迁移失败，router 拒绝以明文路径启动"),
         }
@@ -317,6 +339,7 @@ pub async fn run(paths: Paths) -> Result<()> {
     let state = AppState::new(paths.clone(), client, cache, router_token);
 
     let app = Router::new()
+        .route("/alkanet/health", get(health))
         .route("/ccms/health", get(health))
         .route("/v1/models", get(models))
         .fallback(proxy)
@@ -338,7 +361,7 @@ pub async fn run(paths: Paths) -> Result<()> {
     let pid = std::process::id();
     fsutil::write_atomic(&paths.pid, format!("{pid}\n").as_bytes(), 0o644)?;
     println!(
-        "ccms router v{} listening on http://{listen}  retry={}x",
+        "alkanetd v{} listening on http://{listen}  retry={}x",
         env!("CARGO_PKG_VERSION"),
         cfg.retry.attempts
     );
@@ -379,7 +402,7 @@ async fn shutdown_signal() {
     {
         let _ = tokio::signal::ctrl_c().await;
     }
-    eprintln!("ccms router: 收到退出信号");
+    eprintln!("alkanetd: 收到退出信号");
 }
 
 async fn health(State(state): State<AppState>) -> Json<Value> {
@@ -390,7 +413,7 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
     }
     Json(json!({
         "ok": true,
-        "service": "ccms",
+        "service": "alkanet",
         "pid": std::process::id(),
         "version": env!("CARGO_PKG_VERSION"),
         "uptime_s": state.started.elapsed().as_secs(),
@@ -408,7 +431,7 @@ async fn models(State(state): State<AppState>, headers: HeaderMap) -> Response {
         return json_error(
             StatusCode::UNAUTHORIZED,
             "authentication_error",
-            "ccms: router token 无效或缺失",
+            "alkanet: router token 无效或缺失",
         );
     }
     let (routes, _) = state.snapshot();
@@ -418,7 +441,7 @@ async fn models(State(state): State<AppState>, headers: HeaderMap) -> Response {
         .iter()
         .map(|(tier, route)| {
             json!({
-                "id": format!("ccms-{tier}"),
+                "id": format!("alkanet-{tier}"),
                 "type": "model",
                 "display_name": format!("ccms {tier} → {}/{}", route.provider, route.model),
                 "created_at": created,
@@ -616,7 +639,10 @@ where
 /// 档位解析：先认 `ccms-<tier>` 哨兵名，再认模型名里的档位关键字，最后落到默认档位。
 pub fn resolve_tier(model: &str, cfg: &RoutesConfig) -> String {
     let lower = model.to_ascii_lowercase();
-    let bare = lower.strip_prefix("ccms-").unwrap_or(&lower);
+    let bare = lower
+        .strip_prefix("alkanet-")
+        .or_else(|| lower.strip_prefix("ccms-"))
+        .unwrap_or(&lower);
     if cfg.routes.contains_key(bare) {
         return bare.to_string();
     }
@@ -660,7 +686,7 @@ async fn proxy(State(state): State<AppState>, request: Request) -> Response {
         return json_error(
             StatusCode::UNAUTHORIZED,
             "authentication_error",
-            "ccms: router token 无效或缺失",
+            "alkanet: router token 无效或缺失",
         );
     }
 
@@ -670,7 +696,7 @@ async fn proxy(State(state): State<AppState>, request: Request) -> Response {
             return json_error(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "invalid_request_error",
-                "ccms: 请求体过大",
+                "alkanet: 请求体过大",
             )
         }
     };
@@ -695,7 +721,7 @@ async fn proxy(State(state): State<AppState>, request: Request) -> Response {
             StatusCode::SERVICE_UNAVAILABLE,
             "api_error",
             &format!(
-                "ccms: 档位 {tier} 没有配置路由，编辑 {}",
+                "alkanet: 档位 {tier} 没有配置路由，编辑 {}",
                 state.paths.routes.display()
             ),
         );
@@ -707,7 +733,7 @@ async fn proxy(State(state): State<AppState>, request: Request) -> Response {
             StatusCode::SERVICE_UNAVAILABLE,
             "api_error",
             &format!(
-                "ccms: provider {} 未在 providers.json 中定义",
+                "alkanet: provider {} 未在 providers.json 中定义",
                 route.provider
             ),
         );
@@ -720,7 +746,7 @@ async fn proxy(State(state): State<AppState>, request: Request) -> Response {
             StatusCode::UNAUTHORIZED,
             "authentication_error",
             &format!(
-                "ccms: {} 没有可用 key，运行 ccms --key/-k {} sk-xxx",
+                "alkanet: {} 没有可用 key，运行 ccms --key/-k {} sk-xxx",
                 route.provider, route.provider
             ),
         );
@@ -853,7 +879,7 @@ async fn proxy(State(state): State<AppState>, request: Request) -> Response {
         return json_error(
             StatusCode::BAD_GATEWAY,
             "api_error",
-            &format!("ccms: 连不上 {}（{last_error}）", route.provider),
+            &format!("alkanet: 连不上 {}（{last_error}）", route.provider),
         );
     };
 
@@ -900,7 +926,7 @@ async fn proxy(State(state): State<AppState>, request: Request) -> Response {
                 StatusCode::BAD_GATEWAY,
                 "api_error",
                 &format!(
-                    "ccms: 上游响应超过 {} MiB 上限（{err}）",
+                    "alkanet: 上游响应超过 {} MiB 上限（{err}）",
                     MAX_RESPONSE_BODY / (1024 * 1024)
                 ),
             );
@@ -931,12 +957,12 @@ async fn proxy(State(state): State<AppState>, request: Request) -> Response {
                 let (status, message) = match err {
                     BodyLimitError::Read(_) => (
                         StatusCode::BAD_GATEWAY,
-                        format!("ccms: 读取上游响应失败（{err}）"),
+                        format!("alkanet: 读取上游响应失败（{err}）"),
                     ),
                     _ => (
                         StatusCode::BAD_GATEWAY,
                         format!(
-                            "ccms: 上游响应超过 {} MiB 上限（{err}）",
+                            "alkanet: 上游响应超过 {} MiB 上限（{err}）",
                             MAX_RESPONSE_BODY / (1024 * 1024)
                         ),
                     ),
@@ -959,7 +985,7 @@ async fn proxy(State(state): State<AppState>, request: Request) -> Response {
                 return json_error(
                     StatusCode::GATEWAY_TIMEOUT,
                     "api_error",
-                    "ccms: 等待上游响应超时",
+                    "alkanet: 等待上游响应超时",
                 );
             }
         };
@@ -1115,6 +1141,7 @@ mod tests {
         .unwrap();
 
         let paths = Paths {
+            config: home.join("config.toml"),
             routes: home.join("routes.json"),
             providers: home.join("providers.json"),
             keys_env: home.join("keys.env"),
@@ -1343,6 +1370,7 @@ mod tests {
         let _ = fs::remove_dir_all(&home);
         fs::create_dir_all(&home).unwrap();
         let paths = Paths {
+            config: home.join("config.toml"),
             routes: home.join("routes.json"),
             providers: home.join("providers.json"),
             keys_env: home.join("keys.env"),

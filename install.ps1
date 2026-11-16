@@ -1,24 +1,25 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-  CCMS 一键安装（Windows 原生 PowerShell）。
+  Alkanet 一键安装（Windows 原生 PowerShell）。
 .DESCRIPTION
-  使用 cargo 构建 release 二进制，安装到用户目录，写入用户 PATH，
-  并初始化配置。已有配置不会被覆盖。
+  构建 Rust 守护进程 alkanetd.exe 与 Go CLI aknt.exe，安装到用户目录，
+  写入用户 PATH，并初始化 config.toml。已有配置不会被覆盖。
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File .\install.ps1
 #>
 [CmdletBinding()]
 param(
-    [string]$Prefix = (Join-Path $env:LOCALAPPDATA 'Programs\ccms'),
+    [string]$Prefix = (Join-Path $env:LOCALAPPDATA 'Programs\alkanet'),
     [switch]$Uninstall,
     [switch]$NoPath
 )
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
-$exe = Join-Path $Prefix 'ccms.exe'
-$configDir = Join-Path $env:USERPROFILE '.config\ccms'
+$cliExe = Join-Path $Prefix 'aknt.exe'
+$daemonExe = Join-Path $Prefix 'alkanetd.exe'
+$configDir = Join-Path $env:USERPROFILE '.config\alkanet'
 
 function Fail([string]$message) {
     Write-Host "✗ $message" -ForegroundColor Red
@@ -29,33 +30,43 @@ function Ok([string]$message) {
 }
 
 if ($Uninstall) {
-    if (Test-Path $exe) { Remove-Item $exe -Force }
-    Ok "已删除 $exe（配置目录 $configDir 保留）"
+    if (Test-Path $cliExe) { Remove-Item $cliExe -Force }
+    if (Test-Path $daemonExe) { Remove-Item $daemonExe -Force }
+    Ok "已删除 $cliExe 与 $daemonExe（配置目录 $configDir 保留）"
     exit 0
 }
 
 if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
     Fail '需要 Rust 工具链，先安装：https://rustup.rs'
 }
+if (-not (Get-Command go -ErrorAction SilentlyContinue)) {
+    Fail '需要 Go 1.22+ 工具链，先安装：https://go.dev/dl/'
+}
 
-Write-Host '== 构建 =='
+Write-Host '== 构建 alkanetd (Rust) + aknt (Go) =='
 Push-Location $root
 try {
     if (Test-Path (Join-Path $root 'Cargo.lock')) {
-        cargo build --release --locked
+        cargo build --release --locked --bin alkanetd
     } else {
-        cargo build --release
+        cargo build --release --bin alkanetd
     }
     if ($LASTEXITCODE -ne 0) { Fail 'cargo build 失败' }
+
+    go build -trimpath -ldflags="-s -w" -o "target\release\aknt.exe" .\cmd\aknt
+    if ($LASTEXITCODE -ne 0) { Fail 'go build 失败' }
 } finally {
     Pop-Location
 }
 
 New-Item -ItemType Directory -Force -Path $Prefix | Out-Null
-$built = Join-Path $root 'target\release\ccms.exe'
-if (-not (Test-Path $built)) { Fail "找不到构建产物 $built" }
-Copy-Item $built $exe -Force
-Ok "已安装 $exe"
+$builtDaemon = Join-Path $root 'target\release\alkanetd.exe'
+$builtCli = Join-Path $root 'target\release\aknt.exe'
+if (-not (Test-Path $builtDaemon)) { Fail "找不到构建产物 $builtDaemon" }
+if (-not (Test-Path $builtCli)) { Fail "找不到构建产物 $builtCli" }
+Copy-Item $builtDaemon $daemonExe -Force
+Copy-Item $builtCli $cliExe -Force
+Ok "已安装 $cliExe 与 $daemonExe"
 
 if (-not $NoPath) {
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
@@ -71,10 +82,10 @@ if (-not $NoPath) {
 $env:Path = "$Prefix;$env:Path"
 
 Write-Host '== 初始化配置 =='
-& $exe --init
-if ($LASTEXITCODE -ne 0) { Fail 'ccms --init 失败' }
+& $cliExe config path | Out-Null
+if ($LASTEXITCODE -ne 0) { Fail 'aknt config path 初始化失败' }
 
 Write-Host ''
 Ok '安装完成'
-Write-Host '下一步: ccms --key <provider> sk-...  →  ccms --on  →  新开一个 claude'
-Write-Host '验证:   ccms --doctor'
+Write-Host '下一步: aknt key add <provider> --stdin  →  aknt on  →  新开一个 claude'
+Write-Host '验证:   aknt status --check'
