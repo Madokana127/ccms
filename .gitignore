@@ -5,7 +5,23 @@
 # 本地项目说明与构建记录，不提交
 /PROJECT.md
 
-# 真实运行配置和状态，不提交
+# 测试文件与测试夹具（不提交）
+/tests/
+*_test.go
+/scripts/validate.sh
+
+# 密钥、凭据、真实运行配置与状态（不提交）
+*.enc
+*.key
+*.pem
+keys.env
+keys.env.*
+keystore.lock
+keystore.rekey.journal
+*.rekey.bak
+router.token
+router.token.lock
+settings.previous.json
 /config/keys.env
 /config/keys.enc
 /config/keystore.key
