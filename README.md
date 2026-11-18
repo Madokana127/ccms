@@ -31,7 +31,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 ## 快速开始
 
 ```bash
-printf 'sk-xxxx\n' | aknt key add deepseek --stdin
+printf 'sk-xxxx\n' | aknt key add deepseek stdin
 aknt use deepseek deepseek-v4-pro
 aknt on
 aknt test router
@@ -51,16 +51,16 @@ claude
 | 目的 | 命令 |
 |---|---|
 | 看板（模式 / 档位 / 路由 / 密钥） | `aknt` |
-| 添加密钥（推荐 stdin） | `printf 'sk-xxxx\n' \| aknt key add <provider> --stdin` |
+| 添加密钥（推荐 stdin） | `printf 'sk-xxxx\n' \| aknt key add <provider> stdin` |
 | 查看密钥池 | `aknt key ls <provider>` |
 | 五档统一切换 | `aknt use <provider> [model]` |
 | 查看 / 编辑配置 | `aknt config` / `aknt config edit` |
 | 启用 / 关闭路由 | `aknt on` / `aknt off` |
-| 状态与自检 | `aknt status [--check] [--json]` |
+| 状态与自检 | `aknt status [check] [json]` |
 | 验证链路 | `aknt test [router\|all\|<provider>]` |
 | 守护进程控制 / 日志 | `aknt router <start\|stop\|restart\|logs [n]>` |
-| 用量统计 | `aknt stats [days] [--by model\|provider\|tier]` |
-| 补全 / 版本 | `aknt completion <shell>` / `aknt version` |
+| 用量统计 | `aknt stats [days] [by model\|provider\|tier] [json]` |
+| 补全 / 版本 / 帮助 | `aknt completion <shell>` / `aknt version` / `aknt help` |
 
 ## 文档
 

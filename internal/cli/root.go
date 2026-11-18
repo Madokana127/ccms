@@ -29,11 +29,15 @@ const Version = "1.0.0"
 
 func NewRootCmd() *cobra.Command {
 	root := &cobra.Command{
-		Use:           "aknt",
-		Short:         "Alkanet — Claude Code 多供应商前置路由器",
-		SilenceUsage:  true,
-		SilenceErrors: true,
+		Use:                "aknt",
+		Short:              "Alkanet — Claude Code 多供应商前置路由器",
+		SilenceUsage:       true,
+		SilenceErrors:      true,
+		DisableFlagParsing: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) > 0 {
+				return fmt.Errorf("未知命令: %s（执行 aknt help 查看用法）", args[0])
+			}
 			p, err := config.LoadPaths()
 			if err != nil {
 				return err
@@ -43,8 +47,12 @@ func NewRootCmd() *cobra.Command {
 	}
 
 	root.SetHelpCommand(&cobra.Command{Hidden: true})
+	root.SetHelpFunc(func(cmd *cobra.Command, args []string) {
+		printFullHelp()
+	})
 
 	root.AddCommand(
+		cmdHelp(),
 		cmdVersion(),
 		cmdOn(),
 		cmdOff(),
@@ -61,11 +69,103 @@ func NewRootCmd() *cobra.Command {
 	return root
 }
 
+func rejectFlags(args []string) error {
+	for _, a := range args {
+		if strings.HasPrefix(a, "-") {
+			return fmt.Errorf("不支持短横线参数 %s，请使用裸命令（执行 aknt help 查看用法）", a)
+		}
+	}
+	return nil
+}
+
+func cmdHelp() *cobra.Command {
+	return &cobra.Command{
+		Use:                "help",
+		Short:              "显示完整命令帮助",
+		DisableFlagParsing: true,
+		Run: func(cmd *cobra.Command, args []string) {
+			printFullHelp()
+		},
+	}
+}
+
+func printFullHelp() {
+	s := term.Detect()
+	fmt.Printf("%s — Claude Code 多供应商前置路由器  v%s\n\n", s.Bold("Alkanet (aknt)"), Version)
+
+	section := func(title string) {
+		fmt.Println(s.Bold(title))
+	}
+	item := func(indent int, cmd, desc string) {
+		pad := strings.Repeat(" ", indent)
+		width := 28 - indent
+		if width < len(cmd)+2 {
+			width = len(cmd) + 2
+		}
+		fmt.Printf("%s%-*s%s\n", pad, width, cmd, desc)
+	}
+
+	section("Usage")
+	item(4, "aknt", "显示当前模式、路由与密钥看板")
+	item(4, "aknt <command> ...", "执行指定子命令")
+	fmt.Println()
+
+	section("Mode & Status")
+	item(4, "on", "启用路由模式（拉起守护进程并接管 settings.json）")
+	item(4, "off", "关闭路由模式（恢复 Claude settings.json）")
+	item(4, "status", "查看运行状态与密钥库")
+	item(8, "check", "附带环境、配置与文件权限完整自检")
+	item(8, "json", "以 JSON 格式输出状态（可与 check 组合）")
+	item(4, "version", "显示版本信息")
+	item(4, "help", "显示完整命令序列")
+	fmt.Println()
+
+	section("Config & Routing")
+	item(4, "use <provider> [model]", "将五个档位统一切换到指定 provider")
+	item(4, "config", "查看当前生效配置、路由与 provider 列表")
+	item(8, "edit", "用 $EDITOR 打开 config.toml（保存后校验）")
+	item(8, "path", "输出 config.toml 文件路径")
+	item(8, "reset force", "重置 config.toml 为内置默认")
+	fmt.Println()
+
+	section("Key & Vault")
+	item(4, "key", "管理加密密钥池与密钥库")
+	item(8, "add <provider> <key>", "向密钥池添加一把 key")
+	item(8, "add <provider> stdin", "从标准输入读取一把或多把 key（推荐）")
+	item(8, "ls <provider>", "列出某 provider 的脱敏密钥池")
+	item(8, "rm <provider> <n>", "移除第 n 把 key")
+	item(8, "clear <provider>", "清空某 provider 的密钥池")
+	item(8, "seal", "将明文 keys.env 迁移加密为 keys.enc")
+	item(8, "rekey", "轮换主密钥或切换密钥库模式")
+	fmt.Println()
+
+	section("Router Daemon")
+	item(4, "router", "管理守护进程 alkanetd")
+	item(8, "start", "启动 alkanetd")
+	item(8, "stop", "停止 alkanetd")
+	item(8, "restart", "重启 alkanetd")
+	item(8, "logs [n]", "查看最近 n 行日志（默认 40）")
+	fmt.Println()
+
+	section("Diagnostics & Stats")
+	item(4, "models <provider>", "拉取 provider 可用模型列表")
+	item(4, "test [target]", "验证链路（router | all | <provider>）")
+	item(4, "stats [days]", "查看用量统计（默认 7 天）")
+	item(8, "by <dim>", "按维度过滤（model | provider | tier）")
+	item(8, "json", "以 JSON 格式输出统计")
+	item(8, "reset", "清空统计数据（需确认）")
+	fmt.Println()
+
+	section("Shell")
+	item(4, "completion <shell>", "生成补全脚本（bash | zsh | fish | powershell）")
+}
+
 func cmdVersion() *cobra.Command {
 	return &cobra.Command{
-		Use:   "version",
-		Short: "显示版本",
-		Args:  cobra.NoArgs,
+		Use:                "version",
+		Short:              "显示版本",
+		DisableFlagParsing: true,
+		Args:               cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			fmt.Printf("aknt %s — Alkanet (CLI + alkanetd)\n", Version)
 		},
@@ -74,9 +174,10 @@ func cmdVersion() *cobra.Command {
 
 func cmdOn() *cobra.Command {
 	return &cobra.Command{
-		Use:   "on",
-		Short: "启用路由模式（拉起守护进程并接管 Claude settings.json）",
-		Args:  cobra.NoArgs,
+		Use:                "on",
+		Short:              "启用路由模式",
+		DisableFlagParsing: true,
+		Args:               cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			p, err := config.LoadPaths()
 			if err != nil {
@@ -116,9 +217,10 @@ func cmdOn() *cobra.Command {
 
 func cmdOff() *cobra.Command {
 	return &cobra.Command{
-		Use:   "off",
-		Short: "关闭路由模式（恢复 Claude settings.json）",
-		Args:  cobra.NoArgs,
+		Use:                "off",
+		Short:              "关闭路由模式",
+		DisableFlagParsing: true,
+		Args:               cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			p, err := config.LoadPaths()
 			if err != nil {
@@ -136,13 +238,26 @@ func cmdOff() *cobra.Command {
 }
 
 func cmdStatus() *cobra.Command {
-	var asJSON bool
-	var check bool
-	cmd := &cobra.Command{
-		Use:   "status",
-		Short: "查看运行状态与环境健康（--check 做完整自检，--json 输出 JSON）",
-		Args:  cobra.NoArgs,
+	return &cobra.Command{
+		Use:                "status [check] [json]",
+		Short:              "查看运行状态与环境健康",
+		DisableFlagParsing: true,
+		Args:               cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := rejectFlags(args); err != nil {
+				return err
+			}
+			var asJSON, check bool
+			for _, a := range args {
+				switch a {
+				case "json":
+					asJSON = true
+				case "check":
+					check = true
+				default:
+					return fmt.Errorf("未知 status 参数: %s（可用: aknt status [check] [json]）", a)
+				}
+			}
 			p, err := config.LoadPaths()
 			if err != nil {
 				return err
@@ -150,17 +265,18 @@ func cmdStatus() *cobra.Command {
 			return runStatus(p, asJSON, check)
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, "输出机器可读 JSON")
-	cmd.Flags().BoolVar(&check, "check", false, "包含环境、文件权限、依赖路径完整自检")
-	return cmd
 }
 
 func cmdUse() *cobra.Command {
 	return &cobra.Command{
-		Use:   "use <provider> [model]",
-		Short: "将五个档位统一切换到指定 provider",
-		Args:  cobra.RangeArgs(1, 2),
+		Use:                "use <provider> [model]",
+		Short:              "将五个档位统一切换到指定 provider",
+		DisableFlagParsing: true,
+		Args:               cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := rejectFlags(args); err != nil {
+				return err
+			}
 			p, err := config.LoadPaths()
 			if err != nil {
 				return err
@@ -198,10 +314,14 @@ func cmdUse() *cobra.Command {
 
 func cmdConfig() *cobra.Command {
 	c := &cobra.Command{
-		Use:   "config",
-		Short: "管理配置（查看 / 编辑 / 重置 config.toml）",
-		Args:  cobra.NoArgs,
+		Use:                "config",
+		Short:              "管理配置",
+		DisableFlagParsing: true,
+		Args:               cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) > 0 {
+				return fmt.Errorf("未知 config 操作: %s（可用: edit | path | reset force）", args[0])
+			}
 			p, err := config.LoadPaths()
 			if err != nil {
 				return err
@@ -227,9 +347,10 @@ func cmdConfig() *cobra.Command {
 	}
 	c.AddCommand(
 		&cobra.Command{
-			Use:   "path",
-			Short: "输出配置文件路径",
-			Args:  cobra.NoArgs,
+			Use:                "path",
+			Short:              "输出配置文件路径",
+			DisableFlagParsing: true,
+			Args:               cobra.NoArgs,
 			RunE: func(cmd *cobra.Command, args []string) error {
 				p, err := config.LoadPaths()
 				if err != nil {
@@ -243,9 +364,10 @@ func cmdConfig() *cobra.Command {
 			},
 		},
 		&cobra.Command{
-			Use:   "edit",
-			Short: "用 $EDITOR 打开 config.toml",
-			Args:  cobra.NoArgs,
+			Use:                "edit",
+			Short:              "用 $EDITOR 打开 config.toml",
+			DisableFlagParsing: true,
+			Args:               cobra.NoArgs,
 			RunE: func(cmd *cobra.Command, args []string) error {
 				p, err := config.LoadPaths()
 				if err != nil {
@@ -262,11 +384,11 @@ func cmdConfig() *cobra.Command {
 						ed = "vi"
 					}
 				}
-				c := exec.Command(ed, p.Config)
-				c.Stdin = os.Stdin
-				c.Stdout = os.Stdout
-				c.Stderr = os.Stderr
-				if err := c.Run(); err != nil {
+				ec := exec.Command(ed, p.Config)
+				ec.Stdin = os.Stdin
+				ec.Stdout = os.Stdout
+				ec.Stderr = os.Stderr
+				if err := ec.Run(); err != nil {
 					return err
 				}
 				if _, err := config.Load(p); err != nil {
@@ -277,13 +399,16 @@ func cmdConfig() *cobra.Command {
 			},
 		},
 		&cobra.Command{
-			Use:   "reset",
-			Short: "重置 config.toml 为内置默认（需 --force）",
-			Args:  cobra.NoArgs,
+			Use:                "reset force",
+			Short:              "重置 config.toml 为内置默认",
+			DisableFlagParsing: true,
+			Args:               cobra.MaximumNArgs(1),
 			RunE: func(cmd *cobra.Command, args []string) error {
-				force, _ := cmd.Flags().GetBool("force")
-				if !force {
-					return errors.New("重置会覆盖现有 config.toml，请加 --force 确认")
+				if err := rejectFlags(args); err != nil {
+					return err
+				}
+				if len(args) != 1 || args[0] != "force" {
+					return errors.New("重置会覆盖现有 config.toml，请执行: aknt config reset force")
 				}
 				p, err := config.LoadPaths()
 				if err != nil {
@@ -297,41 +422,46 @@ func cmdConfig() *cobra.Command {
 			},
 		},
 	)
-	c.Commands()[len(c.Commands())-1].Flags().Bool("force", false, "确认覆盖现有配置")
 	return c
 }
 
 func cmdKey() *cobra.Command {
 	k := &cobra.Command{
-		Use:   "key",
-		Short: "管理加密密钥池与密钥库（底层由 alkanetd 执行）",
+		Use:                "key",
+		Short:              "管理加密密钥池与密钥库",
+		DisableFlagParsing: true,
 	}
 
-	var fromStdin bool
 	addCmd := &cobra.Command{
-		Use:   "add <provider> [sk-...]",
-		Short: "向密钥池添加 key（推荐 --stdin）",
-		Args:  cobra.RangeArgs(1, 2),
+		Use:                "add <provider> <key|stdin>",
+		Short:              "向密钥池添加 key",
+		DisableFlagParsing: true,
+		Args:               cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			p, err := config.LoadPaths()
 			if err != nil {
 				return err
 			}
+			provider := args[0]
+			if strings.HasPrefix(provider, "-") {
+				return fmt.Errorf("不支持短横线参数 %s，请使用裸命令（执行 aknt help 查看用法）", provider)
+			}
+			val := args[1]
 			var stdinData string
-			callArgs := []string{"add", args[0]}
-			if fromStdin {
+			callArgs := []string{"add", provider}
+			if val == "stdin" {
 				b, err := io.ReadAll(os.Stdin)
 				if err != nil {
 					return err
 				}
 				stdinData = string(b)
 				callArgs = append(callArgs, "--stdin")
+			} else if strings.HasPrefix(val, "-") {
+				return fmt.Errorf("不支持短横线参数 %s，请使用: aknt key add %s stdin", val, provider)
 			} else {
-				if len(args) < 2 {
-					return errors.New("请提供 key 或使用 --stdin")
-				}
-				callArgs = append(callArgs, args[1])
+				callArgs = append(callArgs, val)
 			}
+
 			out, err := daemon.VaultCall(p, stdinData, callArgs...)
 			if err != nil {
 				return err
@@ -345,18 +475,21 @@ func cmdKey() *cobra.Command {
 			if res.Added == 0 {
 				fmt.Println(s.Warn("这些 key 已在池中"))
 			} else {
-				fmt.Println(s.Ok(fmt.Sprintf("%s 密钥池 %d 把（新增 %d）", args[0], res.Total, res.Added)))
+				fmt.Println(s.Ok(fmt.Sprintf("%s 密钥池 %d 把（新增 %d）", provider, res.Total, res.Added)))
 			}
 			return nil
 		},
 	}
-	addCmd.Flags().BoolVar(&fromStdin, "stdin", false, "从 stdin 读取一把或多把 key")
 
 	lsCmd := &cobra.Command{
-		Use:   "ls <provider>",
-		Short: "列出某 provider 的脱敏密钥池",
-		Args:  cobra.ExactArgs(1),
+		Use:                "ls <provider>",
+		Short:              "列出某 provider 的脱敏密钥池",
+		DisableFlagParsing: true,
+		Args:               cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := rejectFlags(args); err != nil {
+				return err
+			}
 			p, err := config.LoadPaths()
 			if err != nil {
 				return err
@@ -383,10 +516,14 @@ func cmdKey() *cobra.Command {
 	}
 
 	rmCmd := &cobra.Command{
-		Use:   "rm <provider> <序号>",
-		Short: "移除第 n 把 key",
-		Args:  cobra.ExactArgs(2),
+		Use:                "rm <provider> <序号>",
+		Short:              "移除第 n 把 key",
+		DisableFlagParsing: true,
+		Args:               cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := rejectFlags(args); err != nil {
+				return err
+			}
 			p, err := config.LoadPaths()
 			if err != nil {
 				return err
@@ -405,10 +542,14 @@ func cmdKey() *cobra.Command {
 	}
 
 	clearCmd := &cobra.Command{
-		Use:   "clear <provider>",
-		Short: "清空某 provider 的密钥池",
-		Args:  cobra.ExactArgs(1),
+		Use:                "clear <provider>",
+		Short:              "清空某 provider 的密钥池",
+		DisableFlagParsing: true,
+		Args:               cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := rejectFlags(args); err != nil {
+				return err
+			}
 			p, err := config.LoadPaths()
 			if err != nil {
 				return err
@@ -422,9 +563,10 @@ func cmdKey() *cobra.Command {
 	}
 
 	sealCmd := &cobra.Command{
-		Use:   "seal",
-		Short: "将明文 keys.env 迁移加密为 keys.enc",
-		Args:  cobra.NoArgs,
+		Use:                "seal",
+		Short:              "将明文 keys.env 迁移加密为 keys.enc",
+		DisableFlagParsing: true,
+		Args:               cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			p, err := config.LoadPaths()
 			if err != nil {
@@ -445,9 +587,10 @@ func cmdKey() *cobra.Command {
 	}
 
 	rekeyCmd := &cobra.Command{
-		Use:   "rekey",
-		Short: "轮换主密钥或切换密钥库模式",
-		Args:  cobra.NoArgs,
+		Use:                "rekey",
+		Short:              "轮换主密钥或切换密钥库模式",
+		DisableFlagParsing: true,
+		Args:               cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			p, err := config.LoadPaths()
 			if err != nil {
@@ -473,15 +616,17 @@ func cmdKey() *cobra.Command {
 
 func cmdRouter() *cobra.Command {
 	r := &cobra.Command{
-		Use:   "router",
-		Short: "管理守护进程 alkanetd",
+		Use:                "router",
+		Short:              "管理守护进程 alkanetd",
+		DisableFlagParsing: true,
 	}
 
 	r.AddCommand(
 		&cobra.Command{
-			Use:   "start",
-			Short: "启动 alkanetd",
-			Args:  cobra.NoArgs,
+			Use:                "start",
+			Short:              "启动 alkanetd",
+			DisableFlagParsing: true,
+			Args:               cobra.NoArgs,
 			RunE: func(cmd *cobra.Command, args []string) error {
 				p, err := config.LoadPaths()
 				if err != nil {
@@ -507,9 +652,10 @@ func cmdRouter() *cobra.Command {
 			},
 		},
 		&cobra.Command{
-			Use:   "stop",
-			Short: "停止 alkanetd",
-			Args:  cobra.NoArgs,
+			Use:                "stop",
+			Short:              "停止 alkanetd",
+			DisableFlagParsing: true,
+			Args:               cobra.NoArgs,
 			RunE: func(cmd *cobra.Command, args []string) error {
 				p, err := config.LoadPaths()
 				if err != nil {
@@ -533,9 +679,10 @@ func cmdRouter() *cobra.Command {
 			},
 		},
 		&cobra.Command{
-			Use:   "restart",
-			Short: "重启 alkanetd",
-			Args:  cobra.NoArgs,
+			Use:                "restart",
+			Short:              "重启 alkanetd",
+			DisableFlagParsing: true,
+			Args:               cobra.NoArgs,
 			RunE: func(cmd *cobra.Command, args []string) error {
 				p, err := config.LoadPaths()
 				if err != nil {
@@ -559,10 +706,14 @@ func cmdRouter() *cobra.Command {
 			},
 		},
 		&cobra.Command{
-			Use:   "logs [n]",
-			Short: "查看最近 n 行日志（默认 40）",
-			Args:  cobra.MaximumNArgs(1),
+			Use:                "logs [n]",
+			Short:              "查看最近 n 行日志",
+			DisableFlagParsing: true,
+			Args:               cobra.MaximumNArgs(1),
 			RunE: func(cmd *cobra.Command, args []string) error {
+				if err := rejectFlags(args); err != nil {
+					return err
+				}
 				p, err := config.LoadPaths()
 				if err != nil {
 					return err
@@ -588,9 +739,10 @@ func cmdRouter() *cobra.Command {
 			},
 		},
 		&cobra.Command{
-			Use:    "ensure",
-			Hidden: true,
-			Args:   cobra.NoArgs,
+			Use:                "ensure",
+			Hidden:             true,
+			DisableFlagParsing: true,
+			Args:               cobra.NoArgs,
 			RunE: func(cmd *cobra.Command, args []string) error {
 				p, err := config.LoadPaths()
 				if err != nil {
@@ -615,10 +767,14 @@ func cmdRouter() *cobra.Command {
 
 func cmdTest() *cobra.Command {
 	return &cobra.Command{
-		Use:   "test [router|all|<provider>]",
-		Short: "发送最小请求验证链路（默认 router）",
-		Args:  cobra.MaximumNArgs(1),
+		Use:                "test [router|all|<provider>]",
+		Short:              "验证链路",
+		DisableFlagParsing: true,
+		Args:               cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := rejectFlags(args); err != nil {
+				return err
+			}
 			p, err := config.LoadPaths()
 			if err != nil {
 				return err
@@ -634,10 +790,14 @@ func cmdTest() *cobra.Command {
 
 func cmdModels() *cobra.Command {
 	return &cobra.Command{
-		Use:   "models <provider>",
-		Short: "拉取 provider 可用模型列表",
-		Args:  cobra.ExactArgs(1),
+		Use:                "models <provider>",
+		Short:              "拉取 provider 可用模型列表",
+		DisableFlagParsing: true,
+		Args:               cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := rejectFlags(args); err != nil {
+				return err
+			}
 			p, err := config.LoadPaths()
 			if err != nil {
 				return err
@@ -648,27 +808,47 @@ func cmdModels() *cobra.Command {
 }
 
 func cmdStats() *cobra.Command {
-	var asJSON bool
-	var by string
 	c := &cobra.Command{
-		Use:   "stats [days]",
-		Short: "查看用量统计（默认 7 天）",
-		Args:  cobra.MaximumNArgs(1),
+		Use:                "stats [days] [by <model|provider|tier>] [json]",
+		Short:              "查看用量统计",
+		DisableFlagParsing: true,
+		Args:               cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			p, err := config.LoadPaths()
-			if err != nil {
+			if err := rejectFlags(args); err != nil {
 				return err
 			}
 			days := 7
-			if len(args) == 1 {
-				v, err := strconv.Atoi(args[0])
-				if err != nil || v <= 0 {
-					return errors.New("天数必须是正整数")
+			daysSet := false
+			asJSON := false
+			by := ""
+
+			for i := 0; i < len(args); i++ {
+				a := args[i]
+				switch a {
+				case "json":
+					asJSON = true
+				case "by":
+					if i+1 >= len(args) {
+						return errors.New("by 后面需要维度: model | provider | tier")
+					}
+					i++
+					by = args[i]
+					if by != "model" && by != "provider" && by != "tier" {
+						return fmt.Errorf("by 只能是 model / provider / tier（收到 %s）", by)
+					}
+				default:
+					v, err := strconv.Atoi(a)
+					if err != nil || v <= 0 || daysSet {
+						return fmt.Errorf("未知 stats 参数: %s（可用: aknt stats [days] [by model|provider|tier] [json] | reset）", a)
+					}
+					days = v
+					daysSet = true
 				}
-				days = v
 			}
-			if by != "" && by != "model" && by != "provider" && by != "tier" {
-				return fmt.Errorf("--by 只能是 model / provider / tier（收到 %s）", by)
+
+			p, err := config.LoadPaths()
+			if err != nil {
+				return err
 			}
 			f, err := stats.Load(p.Stats)
 			if err != nil {
@@ -684,12 +864,11 @@ func cmdStats() *cobra.Command {
 			return nil
 		},
 	}
-	c.Flags().BoolVar(&asJSON, "json", false, "输出 JSON")
-	c.Flags().StringVar(&by, "by", "", "按维度过滤: model|provider|tier")
 	c.AddCommand(&cobra.Command{
-		Use:   "reset",
-		Short: "清空统计数据",
-		Args:  cobra.NoArgs,
+		Use:                "reset",
+		Short:              "清空统计数据",
+		DisableFlagParsing: true,
+		Args:               cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			p, err := config.LoadPaths()
 			if err != nil {
@@ -714,11 +893,15 @@ func cmdStats() *cobra.Command {
 
 func cmdCompletion(root *cobra.Command) *cobra.Command {
 	return &cobra.Command{
-		Use:       "completion <bash|zsh|fish|powershell>",
-		Short:     "生成 shell 自动补全脚本",
-		Args:      cobra.ExactArgs(1),
-		ValidArgs: []string{"bash", "zsh", "fish", "powershell"},
+		Use:                "completion <bash|zsh|fish|powershell>",
+		Short:              "生成 shell 自动补全脚本",
+		DisableFlagParsing: true,
+		Args:               cobra.ExactArgs(1),
+		ValidArgs:          []string{"bash", "zsh", "fish", "powershell"},
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := rejectFlags(args); err != nil {
+				return err
+			}
 			switch args[0] {
 			case "bash":
 				return root.GenBashCompletionV2(os.Stdout, true)
@@ -776,7 +959,7 @@ func runDashboard(p config.Paths) error {
 			}
 		}
 	}
-	fmt.Println(s.Dim("提示  aknt --help"))
+	fmt.Println(s.Dim("提示  aknt help"))
 	return nil
 }
 

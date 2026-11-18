@@ -87,5 +87,5 @@ if ($LASTEXITCODE -ne 0) { Fail 'aknt config path 初始化失败' }
 
 Write-Host ''
 Ok '安装完成'
-Write-Host '下一步: aknt key add <provider> --stdin  →  aknt on  →  新开一个 claude'
-Write-Host '验证:   aknt status --check'
+Write-Host '下一步: aknt key add <provider> stdin  →  aknt on  →  新开一个 claude'
+Write-Host '验证:   aknt status check'

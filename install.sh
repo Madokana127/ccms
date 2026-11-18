@@ -114,5 +114,5 @@ fi
 
 printf '\n'
 ok "安装完成"
-printf '下一步: aknt key add <provider> --stdin  →  aknt on  →  新开一个 claude\n'
-printf '验证:   aknt status --check && ./scripts/validate.sh\n'
+printf '下一步: aknt key add <provider> stdin  →  aknt on  →  新开一个 claude\n'
+printf '验证:   aknt status check\n'
